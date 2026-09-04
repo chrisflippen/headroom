@@ -1880,14 +1880,27 @@
                             </div>
                         </div>
 
-                        <div class="bg-surface rounded-lg p-4 border border-border">
-                            <div class="text-sm font-medium mb-4 text-gray-300">Recent Historical Checkpoints</div>
+                        <div class="bg-surface rounded-lg p-4 border border-border" data-testid="recent-checkpoints">
+                            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between mb-4">
+                                <div class="text-sm font-medium text-gray-300">Recent Historical Checkpoints</div>
+                                <div class="inline-flex rounded-lg border border-border p-1 self-start" style="background: var(--card-alt-bg);">
+                                    <template x-for="[label, key] in checkpointGranularityOptions" :key="key">
+                                        <button class="px-3 py-1.5 text-sm rounded-md transition-colors"
+                                                :class="checkpointGranularity === key ? 'bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
+                                                @click="setCheckpointGranularity(key)"
+                                                x-text="label"></button>
+                                    </template>
+                                </div>
+                            </div>
+                            <template x-if="recentHistoricalPoints.length === 0">
+                                <div class="text-sm text-gray-500" x-text="checkpointEmptyMessage"></div>
+                            </template>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 <template x-for="point in recentHistoricalPoints" :key="point.timestamp">
-                                    <div class="flex items-center justify-between rounded-lg border border-border px-3 py-3">
+                                    <div class="flex items-center justify-between rounded-lg border border-border px-3 py-3" data-testid="checkpoint-row">
                                         <div>
                                             <div class="text-sm text-gray-300" x-text="formatDateTime(point.timestamp)"></div>
-                                            <div class="text-xs text-gray-500">Cumulative proxy compression savings</div>
+                                            <div class="text-xs text-gray-500" x-text="checkpointRowCaption"></div>
                                         </div>
                                         <div class="text-right">
                                             <div class="font-mono text-sm text-accent"
@@ -1967,6 +1980,8 @@
     </footer>
 
     <script>
+        const CHECKPOINT_GRANULARITY_KEY = 'headroom-checkpoint-granularity';
+
         function dashboard() {
             return {
                 stats: {},
@@ -1977,6 +1992,12 @@
                 lastUpdate: 'never',
                 viewMode: 'session',
                 historyGranularity: 'daily',
+                // Which series the Recent Historical Checkpoints panel lists.
+                // The proxy writes one raw checkpoint per request, so the
+                // newest raw points are seconds apart and round to identical
+                // values on screen; hourly is the useful default. Remembered
+                // per browser under CHECKPOINT_GRANULARITY_KEY.
+                checkpointGranularity: 'hourly',
                 historyChartMode: 'tokens',
                 historySelectedModel: null,
                 requestHistory: [],
@@ -2000,6 +2021,7 @@
                 log_full_messages: false,
 
                 async init() {
+                    this.checkpointGranularity = this.loadCheckpointGranularity();
                     await this.fetchStats();
 
                     this.pollInterval = setInterval(() => {
@@ -2601,8 +2623,64 @@
                     return [...(this.historyStats.series?.monthly || [])].slice(-6).reverse();
                 },
 
+                get checkpointGranularityOptions() {
+                    return [
+                        ['Hourly', 'hourly'],
+                        ['Daily', 'daily'],
+                        ['Weekly', 'weekly'],
+                        ['Monthly', 'monthly'],
+                        ['Every request', 'history'],
+                    ];
+                },
+
+                loadCheckpointGranularity() {
+                    const allowed = this.checkpointGranularityOptions.map(([, key]) => key);
+                    try {
+                        const saved = localStorage.getItem(CHECKPOINT_GRANULARITY_KEY);
+                        if (saved && allowed.includes(saved)) return saved;
+                    } catch (e) {
+                        // Private mode or blocked storage: fall back to the default.
+                    }
+                    return 'hourly';
+                },
+
+                setCheckpointGranularity(key) {
+                    this.checkpointGranularity = key;
+                    try {
+                        localStorage.setItem(CHECKPOINT_GRANULARITY_KEY, key);
+                    } catch (e) {
+                        // Storage unavailable: the choice still applies for this page view.
+                    }
+                },
+
+                get checkpointSourcePoints() {
+                    if (this.checkpointGranularity === 'history') {
+                        return this.historyStats.history || [];
+                    }
+                    const series = this.historyStats.series || {};
+                    return series[this.checkpointGranularity] || [];
+                },
+
                 get recentHistoricalPoints() {
-                    return [...(this.historyStats.history || [])].slice(-8).reverse();
+                    return [...this.checkpointSourcePoints].slice(-8).reverse();
+                },
+
+                get checkpointRowCaption() {
+                    const captions = {
+                        hourly: 'Cumulative proxy compression savings at the end of this hour',
+                        daily: 'Cumulative proxy compression savings at the end of this day',
+                        weekly: 'Cumulative proxy compression savings at the end of this week',
+                        monthly: 'Cumulative proxy compression savings at the end of this month',
+                        history: 'Cumulative proxy compression savings after this request',
+                    };
+                    return captions[this.checkpointGranularity] || 'Cumulative proxy compression savings';
+                },
+
+                get checkpointEmptyMessage() {
+                    const names = { hourly: 'hourly', daily: 'daily', weekly: 'weekly', monthly: 'monthly' };
+                    const name = names[this.checkpointGranularity];
+                    if (!name) return 'No checkpoints recorded yet.';
+                    return `No ${name} rollups yet. They appear once a full ${name === 'daily' ? 'day' : name.replace('ly', '')} of savings has been recorded; pick "Every request" to see raw checkpoints.`;
                 },
 
                 async downloadHistory(format = 'json', series = null) {

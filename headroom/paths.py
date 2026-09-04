@@ -72,6 +72,7 @@ _SESSION_STATS_FILE = "session_stats.jsonl"
 _SAVINGS_EVENTS_FILE = "savings_events.jsonl"
 _SYNC_STATE_FILE = "sync_state.json"
 _BRIDGE_STATE_FILE = "bridge_state.json"
+_CODE_TOOLS_DIR = "code_tools"
 _LOGS_DIR = "logs"
 _PROXY_LOG_FILE = "proxy.log"
 _DEBUG_400_DIR = "debug_400"
@@ -80,6 +81,7 @@ _BIN_DIR = "bin"
 _PROXY_CLIENTS_DIR = "clients"
 _DEPLOY_DIR = "deploy"
 _PLUGINS_DIR = "plugins"
+_CONNECTIONS_FILE = "connections.json"
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +326,12 @@ def bin_dir() -> Path:
     return workspace_dir() / _BIN_DIR
 
 
+def code_tools_dir() -> Path:
+    """Return the directory holding code-agent tool state (e.g. the read cache)."""
+
+    return workspace_dir() / _CODE_TOOLS_DIR
+
+
 def proxy_clients_dir(port: int) -> Path:
     """Per-port dir of live wrap-client markers (one file per client PID)."""
 
@@ -351,6 +359,16 @@ def proxy_start_lock_path(port: int) -> Path:
 # ---------------------------------------------------------------------------
 # Per-resource helpers -- config bucket
 # ---------------------------------------------------------------------------
+
+
+def connections_path() -> Path:
+    """Return the path for the code agent's connection reference config.
+
+    Holds only connection names, database kind, and a keychain pointer --
+    never a URL or password. See ``headroom.code_tools.connections``.
+    """
+
+    return config_dir() / _CONNECTIONS_FILE
 
 
 def models_config_path() -> Path:
@@ -435,11 +453,13 @@ __all__ = [
     "debug_400_dir",
     "codex_wire_debug_dir",
     "bin_dir",
+    "code_tools_dir",
     "proxy_clients_dir",
     "deploy_root",
     "beacon_lock_path",
     "proxy_start_lock_path",
     "models_config_path",
+    "connections_path",
     "plugin_config_dir",
     "plugin_workspace_dir",
 ]

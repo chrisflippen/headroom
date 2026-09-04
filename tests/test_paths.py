@@ -318,6 +318,17 @@ def test_bin_dir_default(fake_home: Path) -> None:
     assert paths.bin_dir() == fake_home / ".headroom" / "bin"
 
 
+def test_code_tools_dir_default(fake_home: Path) -> None:
+    assert paths.code_tools_dir() == fake_home / ".headroom" / "code_tools"
+
+
+def test_code_tools_dir_follows_workspace_env(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clean_env.setenv(paths.HEADROOM_WORKSPACE_DIR_ENV, str(tmp_path / "ws"))
+    assert paths.code_tools_dir() == tmp_path / "ws" / "code_tools"
+
+
 def test_deploy_root_default(fake_home: Path) -> None:
     assert paths.deploy_root() == fake_home / ".headroom" / "deploy"
 

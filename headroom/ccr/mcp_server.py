@@ -7,6 +7,8 @@ Tools:
     headroom_compress   — Compress content on demand (no proxy needed)
     headroom_retrieve   — Retrieve original uncompressed content by hash
     headroom_stats      — Session compression statistics
+    Search              — Read project files, with an unchanged-file marker
+                           that saves tokens on repeat reads
 
 Usage:
     # As standalone server (stdio transport, called by AI coding tools)
@@ -73,19 +75,9 @@ except ImportError:
 CCR_TOOL_NAME = "headroom_retrieve"
 COMPRESS_TOOL_NAME = "headroom_compress"
 STATS_TOOL_NAME = "headroom_stats"
-READ_TOOL_NAME = "headroom_read"
+SEARCH_TOOL_NAME = "Search"
 
 logger = logging.getLogger("headroom.ccr.mcp")
-
-# Feature flag: enable headroom_read tool (file read caching via CCR)
-# Set HEADROOM_MCP_READ=on to enable
-_READ_ENABLED = os.environ.get("HEADROOM_MCP_READ", "off").lower().strip() in (
-    "on",
-    "true",
-    "1",
-    "yes",
-    "enabled",
-)
 
 DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787")
 
@@ -378,8 +370,6 @@ class HeadroomMCPServer:
         self._stats = SessionStats()
         self._local_store: Any = None  # Lazy-initialized CompressionStore
         self._compressor_initialized = False
-        # File read cache: path → (content_hash, ccr_hash, line_count, token_count)
-        self._file_cache: dict[str, tuple[str, str, int, int]] = {}
 
         if not MCP_AVAILABLE or Server is None:
             raise ImportError("MCP SDK not installed. Install with: pip install mcp")
@@ -607,103 +597,122 @@ class HeadroomMCPServer:
             )
         return None
 
+    def _tool_definitions(self) -> list[Tool]:
+        """Build the list of MCP tools this server exposes.
+
+        Pulled out of the ``list_tools`` handler so tests can call it
+        directly — the MCP decorator wraps the real handler in a closure
+        that tests can't reach on their own.
+        """
+        return [
+            Tool(
+                name=COMPRESS_TOOL_NAME,
+                description=(
+                    "Compress content to save context window space. "
+                    "Use this on large tool outputs, file contents, search results, "
+                    "or any content you want to shrink before reasoning over it. "
+                    f"The original is stored and can be retrieved later via mcp__headroom__{CCR_TOOL_NAME}. "
+                    "Returns compressed text + a hash for retrieval."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": (
+                                "The content to compress. Can be any text: file contents, "
+                                "JSON, search results, logs, code, etc."
+                            ),
+                        },
+                    },
+                    "required": ["content"],
+                },
+            ),
+            Tool(
+                name=CCR_TOOL_NAME,
+                description=(
+                    "Retrieve original uncompressed content by hash. "
+                    "Use this when you need full details from previously compressed content. "
+                    "The hash comes from headroom_compress results or from compression "
+                    "markers like [N items compressed... hash=abc123]."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "hash": {
+                            "type": "string",
+                            "description": "Hash key from compression (e.g., 'abc123' from hash=abc123)",
+                        },
+                    },
+                    "required": ["hash"],
+                },
+            ),
+            Tool(
+                name=STATS_TOOL_NAME,
+                description=(
+                    "Show compression statistics for this session: "
+                    "total compressions, tokens saved, estimated cost savings, "
+                    "and recent compression events."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+            Tool(
+                name=SEARCH_TOOL_NAME,
+                description=(
+                    "Use this tool instead of the built-in Read tool to look at files. "
+                    "The 'read' action returns a file's numbered lines the first time you "
+                    "read it. If you ask for the same unchanged file again, you get back a "
+                    "short line like "
+                    '<file path="..." status="unchanged" .../> '
+                    "instead of the whole file — that means the content is already in your "
+                    "context from before, so do not re-read it or treat it as missing. "
+                    "Pass start and end to read only a line range. Pass fresh=true to force "
+                    "a full read even if nothing looks changed."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["read"],
+                            "description": "Which Search action to run.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "Path to the file, relative to the project root or absolute."
+                            ),
+                        },
+                        "start": {
+                            "type": "integer",
+                            "description": "First line to return (1-based, inclusive).",
+                        },
+                        "end": {
+                            "type": "integer",
+                            "description": "Last line to return (1-based, inclusive).",
+                        },
+                        "fresh": {
+                            "type": "boolean",
+                            "description": (
+                                "Force a full read, ignoring the unchanged-file cache."
+                            ),
+                        },
+                    },
+                    "required": ["action", "path"],
+                },
+            ),
+        ]
+
     def _setup_handlers(self) -> None:
         """Register all MCP tool handlers."""
 
         @self.server.list_tools()
         async def list_tools() -> list[Tool]:
-            tools = [
-                Tool(
-                    name=COMPRESS_TOOL_NAME,
-                    description=(
-                        "Compress content to save context window space. "
-                        "Use this on large tool outputs, file contents, search results, "
-                        "or any content you want to shrink before reasoning over it. "
-                        f"The original is stored and can be retrieved later via mcp__headroom__{CCR_TOOL_NAME}. "
-                        "Returns compressed text + a hash for retrieval."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": (
-                                    "The content to compress. Can be any text: file contents, "
-                                    "JSON, search results, logs, code, etc."
-                                ),
-                            },
-                        },
-                        "required": ["content"],
-                    },
-                ),
-                Tool(
-                    name=CCR_TOOL_NAME,
-                    description=(
-                        "Retrieve original uncompressed content by hash. "
-                        "Use this when you need full details from previously compressed content. "
-                        "The hash comes from headroom_compress results or from compression "
-                        "markers like [N items compressed... hash=abc123]."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "hash": {
-                                "type": "string",
-                                "description": "Hash key from compression (e.g., 'abc123' from hash=abc123)",
-                            },
-                        },
-                        "required": ["hash"],
-                    },
-                ),
-                Tool(
-                    name=STATS_TOOL_NAME,
-                    description=(
-                        "Show compression statistics for this session: "
-                        "total compressions, tokens saved, estimated cost savings, "
-                        "and recent compression events."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                    },
-                ),
-            ]
-
-            # Conditionally add headroom_read (behind feature flag)
-            if _READ_ENABLED:
-                tools.append(
-                    Tool(
-                        name=READ_TOOL_NAME,
-                        description=(
-                            "Read a file with smart caching. First read returns full content "
-                            "and caches it. Subsequent reads of the same unchanged file return "
-                            "a lightweight cache marker (~20 tokens instead of thousands). "
-                            f"Use mcp__headroom__{CCR_TOOL_NAME} with the hash to get full content if needed. "
-                            "Use this INSTEAD of the built-in Read tool for significant token savings."
-                        ),
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "file_path": {
-                                    "type": "string",
-                                    "description": "Absolute path to the file to read.",
-                                },
-                                "fresh": {
-                                    "type": "boolean",
-                                    "description": (
-                                        "Force a fresh read, bypassing cache. Use after context "
-                                        "compaction, in subagents, or when you need guaranteed "
-                                        "current content."
-                                    ),
-                                },
-                            },
-                            "required": ["file_path"],
-                        },
-                    )
-                )
-
-            return tools
+            return self._tool_definitions()
 
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
@@ -720,8 +729,8 @@ class HeadroomMCPServer:
                     result = await self._handle_retrieve(arguments)
                 elif name == STATS_TOOL_NAME:
                     result = await self._handle_stats()
-                elif name == READ_TOOL_NAME and _READ_ENABLED:
-                    result = await self._handle_read(arguments)
+                elif name == SEARCH_TOOL_NAME:
+                    result = await self._handle_search(arguments)
                 else:
                     result = [
                         TextContent(
@@ -941,118 +950,31 @@ class HeadroomMCPServer:
             result["cost_saved_usd"] = cost.get("total_saved", cost.get("saved", 0))
         return result if result else None
 
-    async def _handle_read(self, arguments: dict[str, Any]) -> list[TextContent]:
-        """Handle headroom_read tool call — file read with session caching."""
-        import hashlib
+    async def _handle_search(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle the Search tool call by running it against code_tools.search.
 
-        file_path = arguments.get("file_path", "")
-        fresh = arguments.get("fresh", False)
+        Path handling and caching live in headroom.code_tools.search — this
+        method just calls it and, on an unchanged-file marker, records the
+        token savings the same way the rest of this server does.
+        """
+        from headroom.code_tools import search as code_tools_search
+        from headroom.code_tools.read_cache import ReadCache
 
-        if not file_path:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": "file_path parameter is required"}),
-                )
-            ]
+        text = code_tools_search.search(arguments, root=Path.cwd())
 
-        path = Path(file_path).expanduser().resolve()
-        if not path.exists():
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"File not found: {file_path}"}),
-                )
-            ]
-        if not path.is_file():
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Not a file: {file_path}"}),
-                )
-            ]
+        if code_tools_search.is_unchanged_marker(text) and arguments.get("action") == "read":
+            try:
+                raw_path = arguments.get("path")
+                if raw_path:
+                    resolved = code_tools_search.resolve_path(str(raw_path), Path.cwd())
+                    entry = ReadCache().get(str(resolved))
+                    if entry is not None:
+                        self._stats.record_compression(entry.token_estimate, 5, "search_unchanged")
+            except Exception:
+                # Stats bookkeeping must never break the tool call itself.
+                pass
 
-        # Read file from disk. PR-A8 / P1-8: avoid lossy decode kwargs
-        # in headroom/ccr/ — use the centralized safe-log decoder so
-        # the project-wide grep stays clean (this path is for tool
-        # output display, not SSE/wire path, so a replacement char on
-        # invalid bytes is acceptable).
-        try:
-            from headroom.proxy.helpers import safe_decode_for_logging
-
-            content = safe_decode_for_logging(path.read_bytes())
-        except Exception as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Cannot read file: {e}"}),
-                )
-            ]
-
-        content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
-        line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        str_path = str(path)
-
-        # Check cache (unless fresh=true)
-        if not fresh and str_path in self._file_cache:
-            cached_hash, ccr_hash, cached_lines, cached_tokens = self._file_cache[str_path]
-            if cached_hash == content_hash:
-                # File unchanged — but is the CCR entry still alive?
-                store = self._get_local_store()
-                if store.exists(ccr_hash):
-                    # CCR alive — return cache marker
-                    self._stats.record_compression(cached_tokens, 5, "read_cache_hit")
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(
-                                {
-                                    "status": "cached",
-                                    "file": file_path,
-                                    "lines": cached_lines,
-                                    "unchanged": True,
-                                    "hash": ccr_hash,
-                                    "note": (
-                                        f"File unchanged since first read ({cached_lines} lines, "
-                                        f"~{cached_tokens} tokens). Content already in your context "
-                                        f"from the first read. Call mcp__headroom__{CCR_TOOL_NAME}(hash='{ccr_hash}') "
-                                        f"if you need the full content again."
-                                    ),
-                                },
-                                indent=2,
-                            ),
-                        )
-                    ]
-                # CCR expired — clear stale cache, fall through to fresh read
-                del self._file_cache[str_path]
-            # File changed — fall through to fresh read
-
-        # Fresh read: store in CCR and cache the hash
-        store = self._get_local_store()
-        ccr_hash = store.store(
-            original=content,
-            compressed=f"[File: {path.name}, {line_count} lines]",
-            original_tokens=len(content.split()),
-            compressed_tokens=5,
-            tool_name="headroom_read",
-            ttl=MCP_SESSION_TTL,
-        )
-
-        token_estimate = len(content.split())
-        self._file_cache[str_path] = (content_hash, ccr_hash, line_count, token_estimate)
-
-        # Return full content with line numbers (like Claude Code's Read tool)
-        numbered_lines = []
-        for i, line in enumerate(content.split("\n"), 1):
-            numbered_lines.append(f"{i:>6}\t{line}")
-        numbered_content = "\n".join(numbered_lines)
-
-        return [
-            TextContent(
-                type="text",
-                text=numbered_content,
-            )
-        ]
+        return [TextContent(type="text", text=text)]
 
     async def _await_parent_death(self, interval: float) -> None:
         """Resolve once the launching parent process is gone.

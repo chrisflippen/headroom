@@ -40,6 +40,24 @@ DEFAULT_MAX_PROJECTS = 50
 DEFAULT_MAX_HISTORY_AGE_DAYS = 365
 DEFAULT_MAX_RESPONSE_HISTORY_POINTS = 500
 DEFAULT_DISPLAY_SESSION_INACTIVITY_MINUTES = 60
+# Env override for the idle window after which the display session rolls over.
+# Long parallel-agent runs can sit quiet for hours between waves, so a user may
+# want this to match their retrieval window (e.g. 1440 for a day).
+DISPLAY_SESSION_INACTIVITY_ENV = "HEADROOM_DISPLAY_SESSION_INACTIVITY_MINUTES"
+
+
+def _display_session_inactivity_from_env() -> int:
+    """Minutes from the env var, or the default when unset, blank, or invalid."""
+    raw = os.environ.get(DISPLAY_SESSION_INACTIVITY_ENV, "").strip()
+    if not raw:
+        return DEFAULT_DISPLAY_SESSION_INACTIVITY_MINUTES
+    try:
+        minutes = int(raw)
+    except ValueError:
+        return DEFAULT_DISPLAY_SESSION_INACTIVITY_MINUTES
+    return minutes if minutes >= 1 else DEFAULT_DISPLAY_SESSION_INACTIVITY_MINUTES
+
+
 DEFAULT_FALLBACK_INPUT_COST_PER_TOKEN = 3.0 / 1_000_000
 # Blended output price used only when litellm cannot price the model.
 DEFAULT_FALLBACK_OUTPUT_COST_PER_TOKEN = 15.0 / 1_000_000
@@ -634,7 +652,7 @@ class SavingsTracker:
         max_history_points: int = DEFAULT_MAX_HISTORY_POINTS,
         max_history_age_days: int = DEFAULT_MAX_HISTORY_AGE_DAYS,
         max_response_history_points: int = DEFAULT_MAX_RESPONSE_HISTORY_POINTS,
-        display_session_inactivity_minutes: int = (DEFAULT_DISPLAY_SESSION_INACTIVITY_MINUTES),
+        display_session_inactivity_minutes: int | None = None,
         stateless: bool = False,
         save_flush_every: int = 1,
     ) -> None:
@@ -652,6 +670,8 @@ class SavingsTracker:
             ),
             1,
         )
+        if display_session_inactivity_minutes is None:
+            display_session_inactivity_minutes = _display_session_inactivity_from_env()
         self._display_session_inactivity_minutes = max(
             _coerce_int(
                 display_session_inactivity_minutes,

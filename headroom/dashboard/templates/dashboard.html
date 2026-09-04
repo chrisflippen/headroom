@@ -191,7 +191,40 @@
     <main class="p-6 max-w-7xl mx-auto">
         <template x-if="viewMode === 'session'">
             <div>
-                <p class="mb-4 text-xs text-gray-500">Current proxy process · runtime counters reset on restart</p>
+                <!-- Saved session: the tracker persists a display session that
+                     survives proxy restarts and rolls over only after the idle
+                     window. Lead with it so a restart does not look like lost
+                     data; the per-process counters below are labelled as such. -->
+                <template x-if="savedSession">
+                    <section class="mb-6 rounded-lg border border-border bg-surface p-4" data-testid="saved-session">
+                        <div class="mb-3 flex flex-col gap-1 lg:flex-row lg:items-baseline lg:justify-between">
+                            <h3 class="text-sm font-medium text-gray-300">
+                                Session since <span x-text="formatDateTime(savedSession.started_at)"></span>
+                            </h3>
+                            <span class="text-xs text-gray-500" x-text="savedSessionPolicyLabel"></span>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-gray-500">Requests</div>
+                                <div class="text-2xl font-light tabular-nums" data-testid="saved-session-requests" x-text="(savedSession.requests || 0).toLocaleString()"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-gray-500">Tokens saved</div>
+                                <div class="text-2xl font-light tabular-nums text-accent" data-testid="saved-session-tokens" x-text="formatNumber(savedSession.tokens_saved || 0)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-gray-500">Compression saved</div>
+                                <div class="text-2xl font-light tabular-nums text-emerald-400" data-testid="saved-session-compression-usd" x-text="'$' + formatCurrency(savedSession.compression_savings_usd || 0)"></div>
+                            </div>
+                            <div>
+                                <div class="text-xs uppercase tracking-wide text-gray-500">Cache discount</div>
+                                <div class="text-2xl font-light tabular-nums text-cyan-400" data-testid="saved-session-cache-usd" x-text="'$' + formatCurrency(savedSession.cache_savings_usd || 0)"></div>
+                            </div>
+                        </div>
+                    </section>
+                </template>
+
+                <p class="mb-4 text-xs text-gray-500">This proxy process · timing and runtime counters below reset on restart</p>
 
                 <!-- Runtime Overview -->
                 <div class="grid grid-cols-1 gap-4 mb-6 lg:grid-cols-2">
@@ -2429,6 +2462,23 @@
                     if ((this.historyStats.history || []).length >= 2) {
                         this.historyGranularity = 'history';
                     }
+                },
+
+                get savedSession() {
+                    const session = this.stats.display_session;
+                    if (!session || typeof session !== 'object') return null;
+                    if (!(session.requests > 0)) return null;
+                    return session;
+                },
+
+                get savedSessionPolicyLabel() {
+                    const minutes = this.stats.display_session_policy?.rollover_inactivity_minutes;
+                    const idle = minutes >= 1440 && minutes % 1440 === 0
+                        ? `${minutes / 1440} day${minutes === 1440 ? '' : 's'}`
+                        : minutes >= 60 && minutes % 60 === 0
+                            ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}`
+                            : `${minutes || 60} min`;
+                    return `Saved to disk · survives restarts · starts over after ${idle} idle`;
                 },
 
                 get historyChartModeOptions() {

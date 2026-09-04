@@ -158,3 +158,24 @@ def test_empty_series_shows_explanation_instead_of_raw_points() -> None:
         expect(panel.get_by_text("No hourly rollups yet", exact=False)).to_be_visible()
 
         browser.close()
+
+
+def test_daily_checkpoints_show_the_bucket_date_not_a_shifted_local_time() -> None:
+    """Rollup buckets start at UTC midnight; showing them in local time moves them to the day before."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(
+            timezone_id="America/Chicago", viewport={"width": 1440, "height": 1800}
+        )
+        page = context.new_page()
+        _open_history_view(page, _history_payload())
+
+        panel = _checkpoint_panel(page)
+        panel.get_by_role("button", name="Daily", exact=True).click()
+        rows = panel.get_by_test_id("checkpoint-row")
+        expect(rows).to_have_count(2)
+        expect(rows.first).to_contain_text("Sep 4")
+        expect(rows.first).not_to_contain_text("Sep 3")
+        expect(rows.first).not_to_contain_text("PM")
+
+        browser.close()

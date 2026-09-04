@@ -110,3 +110,18 @@ def test_per_model_breakdown_follows_hourly_buckets() -> None:
         expect(page.get_by_text("Hourly buckets", exact=True)).to_be_visible()
 
         browser.close()
+
+
+def test_summary_average_follows_the_selected_series_and_skips_the_open_bucket() -> None:
+    """Hourly selected: average is the mean of completed hourly buckets, not lifetime / month count."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 1800})
+        _open_history_view(page, _fresh_install_payload())
+
+        summary = page.get_by_test_id("history-summary")
+        expect(summary.get_by_text("Average per hour", exact=True)).to_be_visible()
+        # completed hourly buckets: 400,817 and 766,735 -> mean 583,776
+        expect(summary.get_by_test_id("history-summary-average")).to_have_text("583.8k tokens")
+
+        browser.close()

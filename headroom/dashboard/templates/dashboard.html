@@ -1663,7 +1663,7 @@
                                         <template x-for="point in recentDailyHistory" :key="point.timestamp">
                                             <div class="flex items-center justify-between">
                                                 <div>
-                                                    <div class="text-sm text-gray-300" x-text="formatDate(point.timestamp)"></div>
+                                                    <div class="text-sm text-gray-300" x-text="formatSeriesStampFor(point.timestamp, 'daily')"></div>
                                                     <div class="text-xs text-gray-500"
                                                          x-text="formatNumber(point.total_tokens_saved) + ' cumulative'"></div>
                                                 </div>
@@ -1691,7 +1691,7 @@
                                         <template x-for="point in recentWeeklyHistory" :key="point.timestamp">
                                             <div class="flex items-center justify-between">
                                                 <div>
-                                                    <div class="text-sm text-gray-300" x-text="formatDate(point.timestamp)"></div>
+                                                    <div class="text-sm text-gray-300" x-text="formatSeriesStampFor(point.timestamp, 'weekly')"></div>
                                                     <div class="text-xs text-gray-500"
                                                          x-text="formatNumber(point.total_tokens_saved) + ' cumulative'"></div>
                                                 </div>
@@ -1719,7 +1719,7 @@
                                         <template x-for="point in recentMonthlyHistory" :key="point.timestamp">
                                             <div class="flex items-center justify-between">
                                                 <div>
-                                                    <div class="text-sm text-gray-300" x-text="formatMonth(point.timestamp)"></div>
+                                                    <div class="text-sm text-gray-300" x-text="formatSeriesStampFor(point.timestamp, 'monthly')"></div>
                                                     <div class="text-xs text-gray-500"
                                                          x-text="formatNumber(point.total_tokens_saved) + ' cumulative'"></div>
                                                 </div>
@@ -1881,7 +1881,7 @@
                                 </template>
                             </div>
 
-                            <div class="bg-surface rounded-lg p-4 border border-border">
+                            <div class="bg-surface rounded-lg p-4 border border-border" data-testid="history-summary">
                                 <div class="text-sm font-medium mb-4 text-gray-300">Historical Summary</div>
                                 <div class="space-y-3">
                                     <div class="flex justify-between items-center">
@@ -1900,9 +1900,9 @@
                                               x-text="formatNumber(historySelectedPointCount)"></span>
                                     </div>
                                     <div class="flex justify-between items-center">
-                                        <span class="text-sm text-gray-400">Average / month</span>
-                                        <span class="font-mono text-sm"
-                                              x-text="formatNumber(historyAverageTokensPerMonth) + ' tokens'"></span>
+                                        <span class="text-sm text-gray-400" x-text="historySummaryAverageLabel"></span>
+                                        <span class="font-mono text-sm" data-testid="history-summary-average"
+                                              x-text="formatNumber(historySummaryAverageTokens) + ' tokens'"></span>
                                     </div>
                                     <div class="flex justify-between items-center">
                                         <span class="text-sm text-gray-400">Retention</span>
@@ -1932,7 +1932,7 @@
                                 <template x-for="point in recentHistoricalPoints" :key="point.timestamp">
                                     <div class="flex items-center justify-between rounded-lg border border-border px-3 py-3" data-testid="checkpoint-row">
                                         <div>
-                                            <div class="text-sm text-gray-300" x-text="formatDateTime(point.timestamp)"></div>
+                                            <div class="text-sm text-gray-300" x-text="formatCheckpointStamp(point.timestamp)"></div>
                                             <div class="text-xs text-gray-500" x-text="checkpointRowCaption"></div>
                                         </div>
                                         <div class="text-right">
@@ -2013,8 +2013,82 @@
     </footer>
 
     <script>
+        // ---- History series ------------------------------------------------
+        // The one place that knows what a history series is. Every option
+        // list, label, caption, empty-state message, and timestamp format in
+        // the Historical view derives from this table, so adding a series or
+        // renaming one is a single edit.
+        //
+        // Rollup buckets start on UTC boundaries, so day/month stamps are
+        // rendered in UTC; rendering them in local time shifts a "Sep 4"
+        // bucket to "Sep 3, 07:00 PM" for anyone west of Greenwich.
+        const HISTORY_SERIES = {
+            hourly:  { label: 'Hourly',      noun: 'hour',    rollup: true,  stamp: 'hour' },
+            daily:   { label: 'Daily',       noun: 'day',     rollup: true,  stamp: 'day' },
+            weekly:  { label: 'Weekly',      noun: 'week',    rollup: true,  stamp: 'day' },
+            monthly: { label: 'Monthly',     noun: 'month',   rollup: true,  stamp: 'month' },
+            history: { label: 'Checkpoints', noun: 'request', rollup: false, stamp: 'minute', pickerLabel: 'Every request' },
+        };
+        const ROLLUP_SERIES_KEYS = ['hourly', 'daily', 'weekly', 'monthly'];
+        const HISTORY_SERIES_KEYS = [...ROLLUP_SERIES_KEYS, 'history'];
+
+        function seriesPoints(historyStats, key) {
+            if (key === 'history') return historyStats?.history || [];
+            return historyStats?.series?.[key] || [];
+        }
+
+        // Finest series (in HISTORY_SERIES_KEYS order) holding at least
+        // `minPoints`, or null when none does.
+        function finestSeriesWith(historyStats, minPoints, keys = HISTORY_SERIES_KEYS) {
+            return keys.find((key) => seriesPoints(historyStats, key).length >= minPoints) || null;
+        }
+
+        // Mean tokens saved per completed bucket. The newest bucket is still
+        // filling, so it is skipped whenever an earlier one exists; a lone
+        // bucket is reported as-is rather than hidden.
+        function averageBucketTokens(points) {
+            if (!points.length) return 0;
+            const completed = points.length > 1 ? points.slice(0, -1) : points;
+            const total = completed.reduce((sum, point) => sum + (point.tokens_saved || 0), 0);
+            return Math.round(total / completed.length);
+        }
+
+        function formatSeriesStamp(ts, key) {
+            if (!ts) return '-';
+            const date = new Date(ts);
+            switch (HISTORY_SERIES[key]?.stamp) {
+                case 'day':
+                    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+                case 'month':
+                    return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+                case 'hour':
+                    return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                default:
+                    return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            }
+        }
+
+        // Browser-remembered choices. Storage can be missing or blocked
+        // (private mode, thumbnails), so both directions fail soft.
         const CHECKPOINT_GRANULARITY_KEY = 'headroom-checkpoint-granularity';
         const TREND_GRANULARITY_KEY = 'headroom-trend-granularity';
+
+        function rememberedChoice(storageKey, allowed) {
+            try {
+                const saved = localStorage.getItem(storageKey);
+                return saved && allowed.includes(saved) ? saved : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function rememberChoice(storageKey, value) {
+            try {
+                localStorage.setItem(storageKey, value);
+            } catch (e) {
+                // Storage unavailable: the choice still applies for this page view.
+            }
+        }
 
         function dashboard() {
             return {
@@ -2418,50 +2492,27 @@
                 // --- Historical View ---
 
                 get historyGranularityOptions() {
-                    return [
-                        ['Hourly', 'hourly'],
-                        ['Daily', 'daily'],
-                        ['Weekly', 'weekly'],
-                        ['Monthly', 'monthly'],
-                        ['Checkpoints', 'history'],
-                    ];
+                    return HISTORY_SERIES_KEYS.map((key) => [HISTORY_SERIES[key].label, key]);
                 },
 
                 restoreHistoryGranularity() {
-                    const allowed = this.historyGranularityOptions.map(([, key]) => key);
-                    try {
-                        const saved = localStorage.getItem(TREND_GRANULARITY_KEY);
-                        if (saved && allowed.includes(saved)) {
-                            this.historyGranularity = saved;
-                            this.historyGranularityChosen = true;
-                        }
-                    } catch (e) {
-                        // Private mode or blocked storage: keep auto-pick behaviour.
+                    const saved = rememberedChoice(TREND_GRANULARITY_KEY, HISTORY_SERIES_KEYS);
+                    if (saved) {
+                        this.historyGranularity = saved;
+                        this.historyGranularityChosen = true;
                     }
                 },
 
                 setHistoryGranularity(key) {
                     this.historyGranularity = key;
                     this.historyGranularityChosen = true;
-                    try {
-                        localStorage.setItem(TREND_GRANULARITY_KEY, key);
-                    } catch (e) {
-                        // Storage unavailable: the choice still applies for this page view.
-                    }
+                    rememberChoice(TREND_GRANULARITY_KEY, key);
                 },
 
                 autoPickHistoryGranularity() {
                     if (this.historyGranularityChosen) return;
-                    const series = this.historyStats.series || {};
-                    for (const key of ['hourly', 'daily', 'weekly', 'monthly']) {
-                        if ((series[key] || []).length >= 2) {
-                            this.historyGranularity = key;
-                            return;
-                        }
-                    }
-                    if ((this.historyStats.history || []).length >= 2) {
-                        this.historyGranularity = 'history';
-                    }
+                    const key = finestSeriesWith(this.historyStats, 2);
+                    if (key) this.historyGranularity = key;
                 },
 
                 get savedSession() {
@@ -2496,13 +2547,12 @@
                     // Rollup buckets carrying by_model attribution. Raw checkpoints
                     // have no by_model, so the checkpoint view falls back to the
                     // finest rollup that has data.
-                    return this.historyStats.series?.[this.historyModelSourceSeriesKey] || [];
+                    return seriesPoints(this.historyStats, this.historyModelSourceSeriesKey);
                 },
 
                 get historyModelSourceSeriesKey() {
                     if (this.historySelectedSeriesKey !== 'history') return this.historySelectedSeriesKey;
-                    const series = this.historyStats.series || {};
-                    return ['hourly', 'daily', 'weekly', 'monthly'].find((key) => (series[key] || []).length > 0) || 'daily';
+                    return finestSeriesWith(this.historyStats, 1, ROLLUP_SERIES_KEYS) || 'daily';
                 },
 
                 get historyModelChartSeries() {
@@ -2643,46 +2693,47 @@
                 },
 
                 get historySelectedSeriesLabel() {
-                    const labels = {
-                        history: 'Checkpoints',
-                        hourly: 'Hourly',
-                        daily: 'Daily',
-                        weekly: 'Weekly',
-                        monthly: 'Monthly',
-                    };
-                    return labels[this.historySelectedSeriesKey] || 'History';
+                    return HISTORY_SERIES[this.historySelectedSeriesKey]?.label || 'History';
                 },
 
                 get historyModelSourceSeriesLabel() {
                     // historyModelSourceSeries substitutes a rollup at raw
                     // checkpoint granularity; label what is actually shown.
-                    const labels = { hourly: 'Hourly', daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
-                    return labels[this.historyModelSourceSeriesKey] || this.historySelectedSeriesLabel;
+                    return HISTORY_SERIES[this.historyModelSourceSeriesKey]?.label || this.historySelectedSeriesLabel;
+                },
+
+                get historySelectedPoints() {
+                    return seriesPoints(this.historyStats, this.historySelectedSeriesKey);
                 },
 
                 get historySelectedPointCount() {
-                    if (this.historySelectedSeriesKey === 'history') {
-                        return (this.historyStats.history || []).length;
-                    }
-                    return (this.historyStats.series?.[this.historySelectedSeriesKey] || []).length;
+                    return this.historySelectedPoints.length;
+                },
+
+                // "Average per <bucket>" for the selected rollup; raw
+                // checkpoints have no bucket, so the row falls back to hourly.
+                get historySummaryAverageKey() {
+                    return HISTORY_SERIES[this.historySelectedSeriesKey]?.rollup
+                        ? this.historySelectedSeriesKey
+                        : 'hourly';
+                },
+
+                get historySummaryAverageLabel() {
+                    return 'Average per ' + HISTORY_SERIES[this.historySummaryAverageKey].noun;
+                },
+
+                get historySummaryAverageTokens() {
+                    return averageBucketTokens(seriesPoints(this.historyStats, this.historySummaryAverageKey));
                 },
 
                 get historicalTrend() {
-                    if (this.historySelectedSeriesKey === 'history') {
-                        return this.historyStats.history || [];
-                    }
-                    return this.historyStats.series?.[this.historySelectedSeriesKey] || [];
+                    return this.historySelectedPoints;
                 },
 
                 get historyTrendLabel() {
-                    const labels = {
-                        history: 'Checkpoint history',
-                        hourly: 'Hourly cumulative savings',
-                        daily: 'Daily cumulative savings',
-                        weekly: 'Weekly cumulative savings',
-                        monthly: 'Monthly cumulative savings',
-                    };
-                    return labels[this.historySelectedSeriesKey] || 'Historical savings';
+                    const entry = HISTORY_SERIES[this.historySelectedSeriesKey];
+                    if (!entry) return 'Historical savings';
+                    return entry.rollup ? `${entry.label} cumulative savings` : 'Checkpoint history';
                 },
 
                 get historyWindowLabel() {
@@ -2695,96 +2746,65 @@
                 },
 
                 get historyAverageTokensPerDay() {
-                    const daily = this.historyStats.series?.daily || [];
-                    const lifetime = this.historyStats.lifetime?.tokens_saved || 0;
-                    if (daily.length === 0) return 0;
-                    return Math.round(lifetime / daily.length);
+                    return averageBucketTokens(seriesPoints(this.historyStats, 'daily'));
                 },
 
                 get historyAverageTokensPerWeek() {
-                    const weekly = this.historyStats.series?.weekly || [];
-                    const lifetime = this.historyStats.lifetime?.tokens_saved || 0;
-                    if (weekly.length === 0) return 0;
-                    return Math.round(lifetime / weekly.length);
-                },
-
-                get historyAverageTokensPerMonth() {
-                    const monthly = this.historyStats.series?.monthly || [];
-                    const lifetime = this.historyStats.lifetime?.tokens_saved || 0;
-                    if (monthly.length === 0) return 0;
-                    return Math.round(lifetime / monthly.length);
+                    return averageBucketTokens(seriesPoints(this.historyStats, 'weekly'));
                 },
 
                 get recentDailyHistory() {
-                    return [...(this.historyStats.series?.daily || [])].slice(-7).reverse();
+                    return [...seriesPoints(this.historyStats, 'daily')].slice(-7).reverse();
                 },
 
                 get recentWeeklyHistory() {
-                    return [...(this.historyStats.series?.weekly || [])].slice(-6).reverse();
+                    return [...seriesPoints(this.historyStats, 'weekly')].slice(-6).reverse();
                 },
 
                 get recentMonthlyHistory() {
-                    return [...(this.historyStats.series?.monthly || [])].slice(-6).reverse();
+                    return [...seriesPoints(this.historyStats, 'monthly')].slice(-6).reverse();
                 },
 
                 get checkpointGranularityOptions() {
-                    return [
-                        ['Hourly', 'hourly'],
-                        ['Daily', 'daily'],
-                        ['Weekly', 'weekly'],
-                        ['Monthly', 'monthly'],
-                        ['Every request', 'history'],
-                    ];
+                    return HISTORY_SERIES_KEYS.map((key) => {
+                        const entry = HISTORY_SERIES[key];
+                        return [entry.pickerLabel || entry.label, key];
+                    });
                 },
 
                 loadCheckpointGranularity() {
-                    const allowed = this.checkpointGranularityOptions.map(([, key]) => key);
-                    try {
-                        const saved = localStorage.getItem(CHECKPOINT_GRANULARITY_KEY);
-                        if (saved && allowed.includes(saved)) return saved;
-                    } catch (e) {
-                        // Private mode or blocked storage: fall back to the default.
-                    }
-                    return 'hourly';
+                    return rememberedChoice(CHECKPOINT_GRANULARITY_KEY, HISTORY_SERIES_KEYS) || 'hourly';
                 },
 
                 setCheckpointGranularity(key) {
                     this.checkpointGranularity = key;
-                    try {
-                        localStorage.setItem(CHECKPOINT_GRANULARITY_KEY, key);
-                    } catch (e) {
-                        // Storage unavailable: the choice still applies for this page view.
-                    }
-                },
-
-                get checkpointSourcePoints() {
-                    if (this.checkpointGranularity === 'history') {
-                        return this.historyStats.history || [];
-                    }
-                    const series = this.historyStats.series || {};
-                    return series[this.checkpointGranularity] || [];
+                    rememberChoice(CHECKPOINT_GRANULARITY_KEY, key);
                 },
 
                 get recentHistoricalPoints() {
-                    return [...this.checkpointSourcePoints].slice(-8).reverse();
+                    return [...seriesPoints(this.historyStats, this.checkpointGranularity)].slice(-8).reverse();
+                },
+
+                formatCheckpointStamp(ts) {
+                    return formatSeriesStamp(ts, this.checkpointGranularity);
+                },
+
+                formatSeriesStampFor(ts, key) {
+                    return formatSeriesStamp(ts, key);
                 },
 
                 get checkpointRowCaption() {
-                    const captions = {
-                        hourly: 'Cumulative proxy compression savings at the end of this hour',
-                        daily: 'Cumulative proxy compression savings at the end of this day',
-                        weekly: 'Cumulative proxy compression savings at the end of this week',
-                        monthly: 'Cumulative proxy compression savings at the end of this month',
-                        history: 'Cumulative proxy compression savings after this request',
-                    };
-                    return captions[this.checkpointGranularity] || 'Cumulative proxy compression savings';
+                    const entry = HISTORY_SERIES[this.checkpointGranularity];
+                    if (!entry) return 'Cumulative proxy compression savings';
+                    return entry.rollup
+                        ? `Cumulative proxy compression savings at the end of this ${entry.noun}`
+                        : 'Cumulative proxy compression savings after this request';
                 },
 
                 get checkpointEmptyMessage() {
-                    const names = { hourly: 'hourly', daily: 'daily', weekly: 'weekly', monthly: 'monthly' };
-                    const name = names[this.checkpointGranularity];
-                    if (!name) return 'No checkpoints recorded yet.';
-                    return `No ${name} rollups yet. They appear once a full ${name === 'daily' ? 'day' : name.replace('ly', '')} of savings has been recorded; pick "Every request" to see raw checkpoints.`;
+                    const entry = HISTORY_SERIES[this.checkpointGranularity];
+                    if (!entry?.rollup) return 'No checkpoints recorded yet.';
+                    return `No ${entry.label.toLowerCase()} rollups yet. They appear once a full ${entry.noun} of savings has been recorded; pick "${HISTORY_SERIES.history.pickerLabel}" to see raw checkpoints.`;
                 },
 
                 async downloadHistory(format = 'json', series = null) {

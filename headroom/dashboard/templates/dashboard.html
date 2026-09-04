@@ -1709,9 +1709,9 @@
                         </div>
 
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-                            <div class="bg-surface rounded-lg p-4 border border-border lg:col-span-2">
+                            <div class="bg-surface rounded-lg p-4 border border-border lg:col-span-2" data-testid="savings-trend">
                                 <div class="flex flex-col gap-3 mb-4 lg:flex-row lg:items-center lg:justify-between">
-                                    <div class="flex items-center gap-3">
+                                    <div class="flex items-center gap-3" data-testid="savings-trend-heading">
                                         <span class="text-sm font-medium text-gray-300">Historical Savings Trend</span>
                                         <span class="text-xs text-gray-500 font-mono" x-text="historyTrendLabel"></span>
                                     </div>
@@ -1720,7 +1720,7 @@
                                             <template x-for="[label, key] in historyGranularityOptions" :key="key">
                                                 <button class="px-3 py-1.5 text-sm rounded-md transition-colors"
                                                         :class="historyGranularity === key ? 'bg-accent text-black' : 'text-gray-400 hover:text-gray-200'"
-                                                        @click="historyGranularity = key"
+                                                        @click="setHistoryGranularity(key)"
                                                 x-text="label"></button>
                                             </template>
                                         </div>
@@ -1768,7 +1768,7 @@
                                 </template>
                                 <template x-if="historicalTrend.length < 2">
                                     <div class="h-48 flex items-center justify-center text-sm text-gray-500 italic">
-                                        Historical trend data will appear after more saved checkpoints in this granularity.
+                                        Historical trend data will appear after more saved checkpoints in this granularity. Pick a finer one, such as Hourly, to see a line sooner.
                                     </div>
                                 </template>
                                 <div class="flex flex-wrap gap-3 mt-3"
@@ -1981,6 +1981,7 @@
 
     <script>
         const CHECKPOINT_GRANULARITY_KEY = 'headroom-checkpoint-granularity';
+        const TREND_GRANULARITY_KEY = 'headroom-trend-granularity';
 
         function dashboard() {
             return {
@@ -1992,6 +1993,10 @@
                 lastUpdate: 'never',
                 viewMode: 'session',
                 historyGranularity: 'daily',
+                // True once the user clicked a trend granularity (or one was
+                // restored from the browser); until then the chart auto-picks
+                // the finest series that has at least two points to draw.
+                historyGranularityChosen: false,
                 // Which series the Recent Historical Checkpoints panel lists.
                 // The proxy writes one raw checkpoint per request, so the
                 // newest raw points are seconds apart and round to identical
@@ -2022,6 +2027,7 @@
 
                 async init() {
                     this.checkpointGranularity = this.loadCheckpointGranularity();
+                    this.restoreHistoryGranularity();
                     await this.fetchStats();
 
                     this.pollInterval = setInterval(() => {
@@ -2120,6 +2126,7 @@
                         const response = await fetch('/stats-history');
                         if (response.ok) {
                             this.historyStats = await response.json();
+                            this.autoPickHistoryGranularity();
                             this.lastHistoryFetchMs = Date.now();
                         }
                     } catch (e) {
@@ -2379,11 +2386,49 @@
 
                 get historyGranularityOptions() {
                     return [
+                        ['Hourly', 'hourly'],
                         ['Daily', 'daily'],
                         ['Weekly', 'weekly'],
                         ['Monthly', 'monthly'],
                         ['Checkpoints', 'history'],
                     ];
+                },
+
+                restoreHistoryGranularity() {
+                    const allowed = this.historyGranularityOptions.map(([, key]) => key);
+                    try {
+                        const saved = localStorage.getItem(TREND_GRANULARITY_KEY);
+                        if (saved && allowed.includes(saved)) {
+                            this.historyGranularity = saved;
+                            this.historyGranularityChosen = true;
+                        }
+                    } catch (e) {
+                        // Private mode or blocked storage: keep auto-pick behaviour.
+                    }
+                },
+
+                setHistoryGranularity(key) {
+                    this.historyGranularity = key;
+                    this.historyGranularityChosen = true;
+                    try {
+                        localStorage.setItem(TREND_GRANULARITY_KEY, key);
+                    } catch (e) {
+                        // Storage unavailable: the choice still applies for this page view.
+                    }
+                },
+
+                autoPickHistoryGranularity() {
+                    if (this.historyGranularityChosen) return;
+                    const series = this.historyStats.series || {};
+                    for (const key of ['hourly', 'daily', 'weekly', 'monthly']) {
+                        if ((series[key] || []).length >= 2) {
+                            this.historyGranularity = key;
+                            return;
+                        }
+                    }
+                    if ((this.historyStats.history || []).length >= 2) {
+                        this.historyGranularity = 'history';
+                    }
                 },
 
                 get historyChartModeOptions() {
@@ -2395,11 +2440,15 @@
 
                 get historyModelSourceSeries() {
                     // Rollup buckets carrying by_model attribution. Raw checkpoints
-                    // have no by_model, so the checkpoint view falls back to daily.
-                    const key = this.historySelectedSeriesKey === 'history'
-                        ? 'daily'
-                        : this.historySelectedSeriesKey;
-                    return this.historyStats.series?.[key] || [];
+                    // have no by_model, so the checkpoint view falls back to the
+                    // finest rollup that has data.
+                    return this.historyStats.series?.[this.historyModelSourceSeriesKey] || [];
+                },
+
+                get historyModelSourceSeriesKey() {
+                    if (this.historySelectedSeriesKey !== 'history') return this.historySelectedSeriesKey;
+                    const series = this.historyStats.series || {};
+                    return ['hourly', 'daily', 'weekly', 'monthly'].find((key) => (series[key] || []).length > 0) || 'daily';
                 },
 
                 get historyModelChartSeries() {
@@ -2542,6 +2591,7 @@
                 get historySelectedSeriesLabel() {
                     const labels = {
                         history: 'Checkpoints',
+                        hourly: 'Hourly',
                         daily: 'Daily',
                         weekly: 'Weekly',
                         monthly: 'Monthly',
@@ -2550,11 +2600,10 @@
                 },
 
                 get historyModelSourceSeriesLabel() {
-                    // historyModelSourceSeries substitutes the daily rollup
-                    // at raw checkpoint granularity; label what is shown.
-                    return this.historySelectedSeriesKey === 'history'
-                        ? 'Daily'
-                        : this.historySelectedSeriesLabel;
+                    // historyModelSourceSeries substitutes a rollup at raw
+                    // checkpoint granularity; label what is actually shown.
+                    const labels = { hourly: 'Hourly', daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+                    return labels[this.historyModelSourceSeriesKey] || this.historySelectedSeriesLabel;
                 },
 
                 get historySelectedPointCount() {
@@ -2574,6 +2623,7 @@
                 get historyTrendLabel() {
                     const labels = {
                         history: 'Checkpoint history',
+                        hourly: 'Hourly cumulative savings',
                         daily: 'Daily cumulative savings',
                         weekly: 'Weekly cumulative savings',
                         monthly: 'Monthly cumulative savings',

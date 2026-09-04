@@ -663,28 +663,52 @@ class HeadroomMCPServer:
             Tool(
                 name=SEARCH_TOOL_NAME,
                 description=(
-                    "Use this tool instead of the built-in Read tool to look at files. "
-                    "The 'read' action returns a file's numbered lines the first time you "
-                    "read it. If you ask for the same unchanged file again, you get back a "
-                    "short line like "
-                    '<file path="..." status="unchanged" .../> '
-                    "instead of the whole file — that means the content is already in your "
-                    "context from before, so do not re-read it or treat it as missing. "
-                    "Pass start and end to read only a line range. Pass fresh=true to force "
-                    "a full read even if nothing looks changed."
+                    "Use this tool for every file and code lookup — never the built-in Read, "
+                    "Glob, or Grep tools. 'read' returns a file's numbered lines, then a short "
+                    "unchanged marker instead of the full text on later reads of the same "
+                    "content, so don't re-read or treat that as missing. Use 'find' instead of "
+                    "Glob to list files by pattern, honoring .gitignore. Use 'grep' instead of "
+                    "Grep to search file contents, grouped by file. Use 'symbols' to see a "
+                    "file's classes, functions, and types before reading it whole. Use "
+                    "'importers' before renaming or changing a public symbol, to see what "
+                    "else would break. Pass start/end for a line range on read, fresh=true to "
+                    "force a full read."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["read"],
+                            "enum": ["read", "find", "grep", "symbols", "importers"],
                             "description": "Which Search action to run.",
                         },
                         "path": {
                             "type": "string",
                             "description": (
-                                "Path to the file, relative to the project root or absolute."
+                                "Path to a file or folder, relative to the project root or "
+                                "absolute. Required for read, symbols, and importers; "
+                                "optional for grep, where it limits the search to that path."
+                            ),
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": (
+                                "For find: a glob like '**/*.py'. For grep: a regex to search for."
+                            ),
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "For grep: only search files matching this glob.",
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "For grep: extra lines of context around each match.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "For find and grep: cap on results, with a '… N more' footer "
+                                "past this many lines."
                             ),
                         },
                         "start": {
@@ -702,7 +726,7 @@ class HeadroomMCPServer:
                             ),
                         },
                     },
-                    "required": ["action", "path"],
+                    "required": ["action"],
                 },
             ),
         ]

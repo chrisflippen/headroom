@@ -223,6 +223,13 @@ def _macos_launchd_plist(
         "  </array>",
         "  <key>RunAtLoad</key>",
         "  <true/>",
+        # launchd's default 256 soft file cap starves a proxy that keeps
+        # many upstream connections open; the proxy also raises this itself.
+        "  <key>SoftResourceLimits</key>",
+        "  <dict>",
+        "    <key>NumberOfFiles</key>",
+        "    <integer>65536</integer>",
+        "  </dict>",
     ]
     if interval is not None:
         keys.extend(["  <key>StartInterval</key>", f"  <integer>{interval}</integer>"])

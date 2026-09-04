@@ -736,3 +736,12 @@ def test_remove_supervisor_darwin_and_windows(monkeypatch, tmp_path: Path) -> No
         ["schtasks", "/Delete", "/TN", "headroom-default-startup", "/F"],
         ["schtasks", "/Delete", "/TN", "headroom-default-health", "/F"],
     ]
+
+
+def test_macos_launchd_plist_raises_open_file_limit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    manifest = _manifest(supervisor=SupervisorKind.SERVICE.value)
+    _, content = _macos_launchd_plist(manifest, tmp_path / "run.sh")
+    assert "<key>SoftResourceLimits</key>" in content
+    assert "<key>NumberOfFiles</key>" in content
+    assert "<integer>65536</integer>" in content

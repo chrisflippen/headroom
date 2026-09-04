@@ -5594,6 +5594,38 @@ def _configure_windows_uvicorn_loop(uvicorn_kwargs: dict[str, Any]) -> None:
             asyncio.set_event_loop_policy(policy_cls())
 
 
+# Soft open-file limit the proxy asks for at startup. launchd starts user
+# agents with a 256-descriptor cap, which a proxy holding hundreds of
+# keep-alive upstream connections for many parallel sessions exhausts.
+OPEN_FILE_TARGET = 65_536
+
+
+def raise_open_file_limit(target: int = OPEN_FILE_TARGET) -> int:
+    """Lift the soft open-file limit toward ``target``; return the limit in effect.
+
+    Never raises: on platforms without ``resource`` or when the kernel refuses,
+    the current soft limit is returned and serving continues.
+    """
+    try:
+        import resource
+    except ImportError:  # Windows
+        return target
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return target
+    if soft >= target:
+        return soft
+    wanted = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not raise open-file limit from %s to %s: %s", soft, wanted, exc)
+        return soft
+    logger.info("Open-file limit raised from %s to %s", soft, wanted)
+    return wanted
+
+
 def run_server(
     config: ProxyConfig | None = None,
     workers: int = 1,
@@ -5752,6 +5784,7 @@ def run_server(
     # and no CLI flag to change it. Overridable now; the default is unchanged.
     uvicorn_log_level = _resolve_uvicorn_log_level()
 
+    raise_open_file_limit()
     uvicorn.run(
         app_target,
         host=config.host,

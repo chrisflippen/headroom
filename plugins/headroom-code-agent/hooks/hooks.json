@@ -1,0 +1,28 @@
+{
+  "description": "Headroom code agent hooks — keep the code agent's skills current and add a brief under each prompt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent skills-ensure",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent brief",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

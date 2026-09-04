@@ -1,0 +1,16 @@
+{
+  "name": "headroom-code-agent",
+  "version": "0.37.0",
+  "description": "Headroom's code agent: a Claude Code main-thread agent that reaches files and databases only through headroom's Search, Edit, and Sql tools, plus scan and edit helpers and two skills for type checking and project scaffolding.",
+  "author": {
+    "name": "Headroom Contributors",
+    "url": "https://github.com/headroomlabs-ai/headroom"
+  },
+  "homepage": "https://github.com/headroomlabs-ai/headroom",
+  "repository": "https://github.com/headroomlabs-ai/headroom",
+  "keywords": [
+    "headroom",
+    "code-agent",
+    "claude-code"
+  ]
+}

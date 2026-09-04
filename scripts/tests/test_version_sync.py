@@ -28,6 +28,10 @@ def temp_project(tmp_path: Path) -> dict[str, Path]:
     agent_hooks_claude.mkdir(parents=True)
     agent_hooks_github = plugins / "headroom-agent-hooks" / ".github" / "plugin"
     agent_hooks_github.mkdir(parents=True)
+    # A second marketplace plugin with only a .claude-plugin manifest, matching
+    # headroom-code-agent's real layout (it has no .github/plugin/plugin.json).
+    code_agent_claude = plugins / "headroom-code-agent" / ".claude-plugin"
+    code_agent_claude.mkdir(parents=True)
     sdk = root / "sdk"
     typescript = sdk / "typescript"
     typescript.mkdir(parents=True)
@@ -63,12 +67,25 @@ def temp_project(tmp_path: Path) -> dict[str, Path]:
         )
     )
 
+    marketplace_plugin_entries = [
+        {
+            "name": "headroom-agent-hooks",
+            "source": "./plugins/headroom-agent-hooks",
+            "version": "0.1.0",
+        },
+        {
+            "name": "headroom-code-agent",
+            "source": "./plugins/headroom-code-agent",
+            "version": "0.1.0",
+        },
+    ]
+
     repo_claude_marketplace = repo_claude_plugin / "marketplace.json"
     repo_claude_marketplace.write_text(
         json.dumps(
             {
                 "metadata": {"name": "claude-marketplace", "version": "0.1.0"},
-                "plugins": [{"name": "headroom-agent-hooks", "version": "0.1.0"}],
+                "plugins": marketplace_plugin_entries,
             }
         )
     )
@@ -78,7 +95,7 @@ def temp_project(tmp_path: Path) -> dict[str, Path]:
         json.dumps(
             {
                 "metadata": {"name": "copilot-marketplace", "version": "0.1.0"},
-                "plugins": [{"name": "headroom-agent-hooks", "version": "0.1.0"}],
+                "plugins": marketplace_plugin_entries,
             }
         )
     )
@@ -88,6 +105,9 @@ def temp_project(tmp_path: Path) -> dict[str, Path]:
 
     github_plugin = agent_hooks_github / "plugin.json"
     github_plugin.write_text(json.dumps({"name": "headroom-agent-hooks", "version": "0.1.0"}))
+
+    code_agent_plugin = code_agent_claude / "plugin.json"
+    code_agent_plugin.write_text(json.dumps({"name": "headroom-code-agent", "version": "0.1.0"}))
 
     # sdk/typescript/package.json
     typescript_pkg = typescript / "package.json"
@@ -117,6 +137,7 @@ def temp_project(tmp_path: Path) -> dict[str, Path]:
         "repo_github_marketplace": repo_github_marketplace,
         "claude_plugin": claude_plugin,
         "github_plugin": github_plugin,
+        "code_agent_plugin": code_agent_plugin,
         "typescript_pkg": typescript_pkg,
         "server_json": server_json,
     }
@@ -349,6 +370,47 @@ def test_plugin_manifests_only_leaves_package_versions_unchanged(
         == "0.8.0"
     )
     assert not (root / ".releasemetadata").exists()
+
+
+def test_plugin_manifests_only_updates_every_marketplace_plugin(
+    temp_project: dict[str, Path],
+) -> None:
+    """Every plugin the marketplace lists gets its plugin.json and marketplace
+    entry updated, not just the one plugin the script used to know by name."""
+    root = temp_project["root"]
+    script = Path(__file__).parent.parent / "version-sync.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--root",
+            str(root),
+            "--version",
+            "0.9.0",
+            "--plugin-manifests-only",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"Script failed: {result.stderr}"
+
+    claude_plugin = json.loads(temp_project["claude_plugin"].read_text())
+    assert claude_plugin["version"] == "0.9.0"
+
+    code_agent_plugin = json.loads(temp_project["code_agent_plugin"].read_text())
+    assert code_agent_plugin["version"] == "0.9.0"
+
+    repo_claude_marketplace = json.loads(temp_project["repo_claude_marketplace"].read_text())
+    plugins_by_name = {p["name"]: p for p in repo_claude_marketplace["plugins"]}
+    assert plugins_by_name["headroom-agent-hooks"]["version"] == "0.9.0"
+    assert plugins_by_name["headroom-code-agent"]["version"] == "0.9.0"
+
+    repo_github_marketplace = json.loads(temp_project["repo_github_marketplace"].read_text())
+    plugins_by_name = {p["name"]: p for p in repo_github_marketplace["plugins"]}
+    assert plugins_by_name["headroom-agent-hooks"]["version"] == "0.9.0"
+    assert plugins_by_name["headroom-code-agent"]["version"] == "0.9.0"
 
 
 def test_openclaw_headroom_dependency_is_preserved_for_registry_installability(

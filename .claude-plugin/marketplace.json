@@ -25,6 +25,23 @@
         "claude-code",
         "copilot-cli"
       ]
+    },
+    {
+      "name": "headroom-code-agent",
+      "source": "./plugins/headroom-code-agent",
+      "description": "Headroom's code agent: a Claude Code main-thread agent that reaches files and databases only through headroom's Search, Edit, and Sql tools.",
+      "version": "0.37.0",
+      "author": {
+        "name": "Headroom Contributors",
+        "url": "https://github.com/headroomlabs-ai/headroom"
+      },
+      "homepage": "https://github.com/headroomlabs-ai/headroom",
+      "repository": "https://github.com/headroomlabs-ai/headroom",
+      "keywords": [
+        "headroom",
+        "code-agent",
+        "claude-code"
+      ]
     }
   ]
 }

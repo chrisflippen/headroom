@@ -96,17 +96,41 @@ def update_server_json(file_path: Path, version: str) -> None:
         f.write("\n")
 
 
+def discover_plugin_manifest_paths(root: Path) -> list[Path]:
+    """Find every plugin.json manifest the marketplace lists.
+
+    Reads each plugin's ``source`` directory from the marketplace manifest
+    instead of hardcoding one plugin's path, so a new plugin added to the
+    marketplace gets its version synced automatically.
+    """
+    marketplace_path = root / ".claude-plugin" / "marketplace.json"
+    with open(marketplace_path, encoding="utf-8") as f:
+        data = json.load(f)
+    manifest_paths: list[Path] = []
+    plugins = data.get("plugins")
+    if isinstance(plugins, list):
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            source = plugin.get("source")
+            if not isinstance(source, str):
+                continue
+            plugin_dir = root / source
+            for manifest_path in (
+                plugin_dir / ".claude-plugin" / "plugin.json",
+                plugin_dir / ".github" / "plugin" / "plugin.json",
+            ):
+                if manifest_path.is_file():
+                    manifest_paths.append(manifest_path)
+    return manifest_paths
+
+
 def update_plugin_versions(root: Path, version: str) -> None:
-    """Update marketplace and plugin manifest versions."""
+    """Update marketplace and every plugin manifest version."""
     update_marketplace_manifest(root / ".claude-plugin" / "marketplace.json", version)
     update_marketplace_manifest(root / ".github" / "plugin" / "marketplace.json", version)
-    update_plugin_manifest(
-        root / "plugins" / "headroom-agent-hooks" / ".claude-plugin" / "plugin.json", version
-    )
-    update_plugin_manifest(
-        root / "plugins" / "headroom-agent-hooks" / ".github" / "plugin" / "plugin.json",
-        version,
-    )
+    for manifest_path in discover_plugin_manifest_paths(root):
+        update_plugin_manifest(manifest_path, version)
 
 
 def update_openclaw_package_json(file_path: Path, version: str) -> None:

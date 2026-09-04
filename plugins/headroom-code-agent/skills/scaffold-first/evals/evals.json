@@ -1,0 +1,68 @@
+{
+  "skill_name": "scaffold-first",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "pyrefly-setup",
+      "prompt": "Add pyrefly type checking to this Python repo. It should actually run clean when you're done.",
+      "expected_output": "pyrefly added via uv add --dev and configured via pyrefly init (not a hand-written config); pyrefly check passes",
+      "files": ["fixtures/uvrepo"]
+    },
+    {
+      "id": 1,
+      "eval_name": "new-python-service",
+      "prompt": "Start a new Python service repo called queue-worker for a background job runner. Set it up thoroughly - dependencies, lint, types, tests, pre-commit.",
+      "expected_output": "uv init used; version pinned; lockfile present; ruff/pyrefly/pytest/pre-commit wired through official paths; checks pass",
+      "files": []
+    },
+    {
+      "id": 2,
+      "eval_name": "new-sveltekit-app",
+      "prompt": "Create a new SvelteKit app called dashboard with TypeScript, unit tests, and linting set up.",
+      "expected_output": "npx sv create used with sv add for eslint/vitest rather than hand-written configs; svelte-check passes",
+      "files": []
+    },
+    {
+      "id": 3,
+      "eval_name": "ci-workflow",
+      "prompt": "Add GitHub Actions CI to this repo that runs lint and tests on every pull request.",
+      "expected_output": "workflow installs from the committed lockfile (uv sync --locked), uses setup-uv, pins third-party actions",
+      "files": ["fixtures/uvrepo"]
+    },
+    {
+      "id": 4,
+      "eval_name": "swift-cli-tool",
+      "prompt": "Create a new Swift command-line tool package called vinparse that parses VIN strings.",
+      "expected_output": "swift package init --type tool used (argument-parser prewired), not a hand-written Package.swift; swift build passes",
+      "files": []
+    },
+    {
+      "id": 5,
+      "eval_name": "dockerize-uv-service",
+      "prompt": "Containerize this Python service for deployment.",
+      "expected_output": "docker init or the official uv Docker pattern used; lockfile-based install in the image; no latest-tag bases",
+      "files": ["fixtures/uvrepo"]
+    },
+    {
+      "id": 6,
+      "eval_name": "legacy-adoption",
+      "prompt": "This repo still uses old-style Python packaging. Modernize it to our standard tooling without losing anything.",
+      "expected_output": "migrated to uv via official paths (uv init/uv add, requirements imported); requires-python targets the latest major resolved from the live toolchain; lockfile committed; legacy files superseded per uv docs, not left ambiguous",
+      "files": ["fixtures/legacy-pip"]
+    },
+    {
+      "id": 7,
+      "eval_name": "uv-workspace-monorepo",
+      "prompt": "Set up a monorepo called platform-tools with a shared core library and a CLI app that depends on it, one lockfile for everything.",
+      "expected_output": "uv workspace per official docs: members created with uv init, [tool.uv.workspace] at root, single root uv.lock, cross-package dependency wired via workspace source; checks pass",
+      "files": []
+    },
+    {
+      "id": 8,
+      "eval_name": "upgrade-to-latest",
+      "prompt": "Everything in this repo should be on the latest major versions. Audit it and bring it fully current using each tool's official upgrade path.",
+      "expected_output": "python pin bumped to the latest major via uv python pin with the version resolved from the live toolchain (not typed from memory); deps upgraded via uv lock --upgrade / uv sync, never hand-edited; final state verified against the live latest at grade time",
+      "files": ["fixtures/uvrepo-outdated"]
+    }
+  ]
+}

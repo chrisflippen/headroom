@@ -31,6 +31,7 @@ import click
 
 from headroom import fsutil
 from headroom._subprocess import run
+from headroom.code_tools import skills_ensure
 from headroom.providers.claude.vscode import claude_user_settings_path
 
 from .main import main
@@ -357,3 +358,41 @@ def code_agent_status() -> None:
     override = project_agent_override(Path.cwd())
     if override is not None:
         click.echo(f"  Project override: agent={override}")
+
+
+def _skills_ensure_runner(argv: list[str]) -> None:
+    """Run one skills/plugin update command for real, with a timeout.
+
+    Only ever called through `skills_ensure.ensure`'s `runner` parameter,
+    which catches whatever this raises and keeps going with the remaining
+    commands -- a broken network or a missing binary must never stop a
+    session from starting.
+    """
+    result = run(argv, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
+        raise RuntimeError(detail or f"exit code {result.returncode}")
+
+
+@code_agent_group.command("skills-ensure")
+def code_agent_skills_ensure() -> None:
+    """Update the code agent's skills and Claude Code plugins, at most once a day.
+
+    Never fails the session: every failed update command is one short line
+    on stderr, and this command always exits 0.
+    """
+    from datetime import datetime, timezone
+
+    from headroom.paths import workspace_dir
+
+    skills, plugins = skills_ensure.load_configured_skills_and_plugins()
+    state_path = workspace_dir() / "code_tools" / "skills_ensure.json"
+    result = skills_ensure.ensure(
+        skills,
+        plugins,
+        now=datetime.now(timezone.utc),
+        runner=_skills_ensure_runner,
+        state_path=state_path,
+    )
+    for failure in result.failures:
+        click.echo(f"  skills-ensure: {failure}", err=True)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ import click
 
 from headroom import fsutil
 from headroom._subprocess import run
-from headroom.code_tools import skills_ensure
+from headroom.code_tools import brief, skills_ensure
 from headroom.providers.claude.vscode import claude_user_settings_path
 
 from .main import main
@@ -396,3 +397,53 @@ def code_agent_skills_ensure() -> None:
     )
     for failure in result.failures:
         click.echo(f"  skills-ensure: {failure}", err=True)
+
+
+@code_agent_group.command("brief")
+def code_agent_brief() -> None:
+    """Print a brief for the user's prompt, as a UserPromptSubmit hook.
+
+    Reads the hook's stdin JSON (`prompt`, `cwd`, and a few other fields
+    Claude Code always sends). When a brief applies, prints the
+    `additionalContext` JSON Claude Code expects on stdout. Prints nothing
+    and exits 0 in every other case -- missing/invalid stdin, a prompt
+    that does not need a brief, a timeout, or any other error -- since a
+    broken hook must never block a prompt. Also exits immediately, before
+    reading stdin, when `RECURSION_GUARD_ENV` is set: that only happens
+    inside the nested `claude -p` call the brief itself makes, and stops
+    that nested call's own hooks from calling this command again.
+    """
+    if os.environ.get(brief.RECURSION_GUARD_ENV):
+        return
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    prompt = payload.get("prompt")
+    cwd = payload.get("cwd")
+    if not isinstance(prompt, str) or not isinstance(cwd, str):
+        return
+
+    try:
+        result = brief.make_brief(
+            prompt, cwd=cwd, gather=brief.gather, model_runner=brief.default_model_runner
+        )
+    except Exception:
+        return
+    if result is None:
+        return
+
+    click.echo(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": result,
+                }
+            }
+        )
+    )

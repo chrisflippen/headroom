@@ -2472,7 +2472,11 @@
                 },
 
                 get savedSessionPolicyLabel() {
-                    const minutes = this.stats.display_session_policy?.rollover_inactivity_minutes;
+                    // /stats carries the policy inside persistent_savings; keep the
+                    // top-level lookup as a fallback for older payloads.
+                    const policy = this.stats.persistent_savings?.display_session_policy
+                        || this.stats.display_session_policy || {};
+                    const minutes = policy.rollover_inactivity_minutes;
                     const idle = minutes >= 1440 && minutes % 1440 === 0
                         ? `${minutes / 1440} day${minutes === 1440 ? '' : 's'}`
                         : minutes >= 60 && minutes % 60 === 0

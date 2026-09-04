@@ -42,7 +42,9 @@ def _stats_with_saved_session() -> dict:
         "started_at": "2026-09-04T17:38:55Z",
         "last_activity_at": "2026-09-04T20:18:46Z",
     }
-    stats["display_session_policy"] = {"rollover_inactivity_minutes": 60}
+    stats.setdefault("persistent_savings", {})["display_session_policy"] = {
+        "rollover_inactivity_minutes": 1440
+    }
     return stats
 
 
@@ -92,7 +94,7 @@ def test_session_view_leads_with_the_saved_session() -> None:
         expect(strip.get_by_test_id("saved-session-compression-usd")).to_have_text("$75.82")
         expect(strip.get_by_test_id("saved-session-cache-usd")).to_have_text("$700.51")
         expect(strip.get_by_text("survives restarts", exact=False)).to_be_visible()
-        expect(strip.get_by_text("1 hour idle", exact=False)).to_be_visible()
+        expect(strip.get_by_text("1 day idle", exact=False)).to_be_visible()
         # The process-only counters are now labelled as such, not as "the session".
         expect(page.get_by_text("This proxy process", exact=False)).to_be_visible()
 

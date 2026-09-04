@@ -64,6 +64,7 @@ def _register_commands() -> None:
         agent_savings,  # noqa: F401
         audit,  # noqa: F401
         capture,  # noqa: F401
+        code_agent,  # noqa: F401
         copilot_auth,  # noqa: F401
         doctor,  # noqa: F401
         evals,  # noqa: F401

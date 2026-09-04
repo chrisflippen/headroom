@@ -87,10 +87,10 @@ def _invoke_wrap_claude(
     monkeypatch.setattr(wrap_mod, "_restore_claude_wrap_tool_search", lambda *_a, **_k: None)
     monkeypatch.setattr(wrap_mod, "_print_telemetry_notice", lambda: None)
 
-    def fake_ensure_proxy(*args: object, **kwargs: object) -> tuple[None, int]:
-        captured["ensure_args"] = args
+    def fake_ensure_proxy(port: int = 8787, *args: object, **kwargs: object) -> tuple[None, int]:
+        captured["ensure_args"] = (port, *args)
         captured["ensure_kwargs"] = kwargs
-        return None, args[0] if args else 8787
+        return None, port
 
     def fake_run(cmd: list[str], *, env: dict[str, str]) -> _Completed:
         captured["child_cmd"] = cmd
@@ -112,6 +112,11 @@ def _invoke_wrap_claude(
             "--no-mcp",
             "--no-tokensave",
             "--no-serena",
+            # This file's concern is the Vertex/Foundry/1m/tool-search proxy
+            # wiring, not the code agent switch — opt out so it never touches
+            # (or even reads) a real ~/.claude/settings.json, and so the
+            # child_cmd assertions below stay about the thing under test.
+            "--no-code-agent",
             *extra_args,
         ],
         env=env,
@@ -519,7 +524,7 @@ def test_start_proxy_sets_pythonsafepath_to_avoid_cwd_shadow(
 def test_ensure_proxy_restarts_idle_proxy_for_vertex_api_url_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[object] = []
+    calls: list[tuple[Any, ...]] = []
     health = {
         "version": wrap_mod._HEADROOM_VERSION,
         "runtime": {"websocket_sessions": {"active_sessions": 0, "active_relay_tasks": 0}},
@@ -564,7 +569,7 @@ def test_ensure_proxy_restarts_idle_proxy_for_vertex_api_url_mismatch(
 def test_ensure_proxy_restarts_idle_proxy_to_clear_vertex_api_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[object] = []
+    calls: list[tuple[Any, ...]] = []
     health = {
         "version": wrap_mod._HEADROOM_VERSION,
         "runtime": {"websocket_sessions": {"active_sessions": 0, "active_relay_tasks": 0}},

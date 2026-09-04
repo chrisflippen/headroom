@@ -190,6 +190,7 @@ from headroom.providers.zcode import (
 )
 from headroom.proxy.project_context import with_project_prefix as _with_project_prefix
 
+from . import code_agent as _code_agent
 from .main import main
 
 _COPILOT_PROXY_SEED_ENV_VARS = (
@@ -4824,7 +4825,7 @@ def _normalize_openclaw_gateway_provider_ids(provider_ids: tuple[str, ...] | Non
     return _normalize_openclaw_gateway_provider_ids_impl(provider_ids)
 
 
-def _read_openclaw_config_value(openclaw_bin: str, path: str) -> Any | None:
+def _read_openclaw_config_value(openclaw_bin: str, path: str) -> object | None:
     """Read an OpenClaw config value when present, returning None on missing paths."""
     result = run(
         [openclaw_bin, "config", "get", path],
@@ -4834,14 +4835,15 @@ def _read_openclaw_config_value(openclaw_bin: str, path: str) -> Any | None:
     if result.returncode != 0:
         return None
 
-    output = result.stdout.strip()
+    output: str = result.stdout.strip()
     if not output:
         return None
 
     try:
-        return json.loads(output)
+        parsed: object = json.loads(output)
     except json.JSONDecodeError:
         return output
+    return parsed
 
 
 def _decode_openclaw_entry_json(raw_value: str | None) -> Any | None:
@@ -5116,6 +5118,11 @@ def wrap_selfheal(marker: str | None) -> None:
 )
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.option("--prepare-only", is_flag=True, hidden=True)
+@click.option(
+    "--no-code-agent",
+    is_flag=True,
+    help="Skip the headroom code agent switch: launch with your own default agent.",
+)
 @click.argument("claude_args", nargs=-1, type=click.UNPROCESSED)
 def claude(
     port: int,
@@ -5133,6 +5140,7 @@ def claude(
     context_1m: bool,
     verbose: bool,
     prepare_only: bool,
+    no_code_agent: bool,
     claude_args: tuple,
 ) -> None:
     """Launch Claude Code through Headroom proxy.
@@ -5150,6 +5158,7 @@ def claude(
         headroom wrap claude --no-mcp           # Skip MCP retrieve tool registration
         headroom wrap claude --code-memory none # No code-memory MCP
         headroom wrap claude --1m               # Preserve the 1M context window
+        headroom wrap claude --no-code-agent    # Launch with your own default agent
     """
     if prepare_only:
         return
@@ -5446,6 +5455,24 @@ def claude(
                     "(1M context window; issue #1158)"
                 )
 
+        # Code agent switch: make Headroom's code agent (reaches files only
+        # through its own Search/Edit/Sql tools, never the built-in Read,
+        # Edit, Write, Grep, or Glob) the default for this session, unless
+        # the caller opted out or already passed their own --agent.
+        if not no_code_agent:
+            _code_agent.ensure_agent_switch(claude_user_settings_path())
+            _project_agent = _code_agent.project_agent_override(Path.cwd())
+            if _project_agent is not None and _project_agent != _code_agent.DEFAULT_AGENT:
+                click.echo(
+                    f"  Project sets agent={_project_agent} "
+                    "(this overrides the Headroom code agent switch)."
+                )
+            if "--agent" not in claude_args:
+                claude_args = (
+                    *_code_agent.agent_launch_args(_code_agent.DEFAULT_AGENT),
+                    *claude_args,
+                )
+
         result = subprocess.run([claude_bin, *claude_args], env=env)
         raise SystemExit(result.returncode)
 
@@ -5558,6 +5585,11 @@ def unwrap_claude(
         click.echo("  Removed Headroom-managed hooks and proxy env from settings.json.")
     else:
         click.echo("  No Headroom-managed hooks found in settings.json.")
+
+    if _code_agent.remove_agent_switch(claude_user_settings_path()):
+        click.echo("  Removed Headroom code agent switch from settings.json.")
+    else:
+        click.echo("  No Headroom code agent switch found in settings.json.")
 
     _unwrap_settings_path = Path.cwd() / ".claude" / "settings.local.json"
     if _remove_claude_wrap_selfheal_hook(_unwrap_settings_path):

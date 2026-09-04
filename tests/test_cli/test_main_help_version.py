@@ -54,7 +54,10 @@ def test_subcommand_verbose_flag_still_works() -> None:
     with patch("headroom.cli.wrap.shutil.which", return_value="claude"):
         with patch("headroom.cli.wrap._ensure_proxy", return_value=(None, 8787)):
             with patch("headroom.cli.wrap.subprocess.run", return_value=completed):
-                result = runner.invoke(main, ["wrap", "claude", "-v"])
+                # This test's concern is the `-v` alias, not the code agent
+                # switch — opt out so it never touches a real
+                # ~/.claude/settings.json (HOME is not isolated here).
+                result = runner.invoke(main, ["wrap", "claude", "-v", "--no-code-agent"])
 
     assert result.exit_code == 0, result.output
     assert "HEADROOM WRAP: CLAUDE" in result.output

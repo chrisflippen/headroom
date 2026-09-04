@@ -22,6 +22,18 @@ def _no_persistent_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wrap_cli, "_find_persistent_manifest", lambda _port: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_claude_user_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`unwrap claude` removes the code agent switch from the real Claude Code
+    user settings.json unless HOME is isolated — never let a test in this file
+    touch (or strip a real switch from) the machine's actual settings.json.
+    Tests that need a specific HOME still win: they set it after this fixture
+    runs, simply overriding this default.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-claude-home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
 def test_remove_claude_managed_hooks_preserves_unrelated_hooks(tmp_path: Path) -> None:
     settings = tmp_path / "settings.json"
     settings.write_text(
@@ -269,6 +281,10 @@ def test_unwrap_claude_stops_claude_owned_persistent_deployment(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A shell that is itself wrapped exports a proxy base URL; unwrap would
+    # then report routing residue that has nothing to do with this test.
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
     class Manifest:
         profile = "unwrap-2340"
         targets = ["claude"]

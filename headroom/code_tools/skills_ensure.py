@@ -227,14 +227,17 @@ def ensure(
 def load_configured_skills_and_plugins() -> tuple[list[dict[str, str]], list[str]]:
     """The skills and plugins to keep current: settings.json, else the defaults.
 
-    Reads the two dotted keys straight out of headroom's settings.json
-    (bypassing the typed `HEADROOM_*` registry in `headroom.settings_store`,
-    since these are structured lists rather than single env-backed knobs).
-    A missing file, corrupt JSON, or a value that is not shaped as expected
-    falls back to `DEFAULT_SKILLS` / `DEFAULT_PLUGINS` -- this must never
-    raise, since it runs at session start.
+    Plugins go through the typed `HEADROOM_*` registry in
+    `headroom.settings_store` (a `csv-list` field), which validates the
+    value and applies the usual default/file/env precedence; the
+    comma-joined string it returns is split back into a list here. Skills
+    stay a raw settings.json read -- each entry is a structured name+source
+    pair, not a simple comma-separated list, so there's no `csv-list` field
+    shape for it to fit. A missing file, corrupt JSON, or a value that is
+    not shaped as expected falls back to `DEFAULT_SKILLS` / `DEFAULT_PLUGINS`
+    -- this must never raise, since it runs at session start.
     """
-    from headroom import paths
+    from headroom import paths, settings_store
 
     try:
         raw = paths.settings_path().read_text(encoding="utf-8")
@@ -249,9 +252,10 @@ def load_configured_skills_and_plugins() -> tuple[list[dict[str, str]], list[str
     if skills is None:
         skills = [dict(skill) for skill in DEFAULT_SKILLS]
 
-    plugins_value = payload.get(SETTINGS_PLUGINS_KEY)
-    plugins = _valid_plugins(plugins_value) if plugins_value is not None else None
-    if plugins is None:
+    plugins_csv = settings_store.effective_values().get(SETTINGS_PLUGINS_KEY)
+    if isinstance(plugins_csv, str) and plugins_csv:
+        plugins = [token.strip() for token in plugins_csv.split(",") if token.strip()]
+    else:
         plugins = list(DEFAULT_PLUGINS)
 
     return skills, plugins
@@ -270,11 +274,3 @@ def _valid_skills(value: object) -> list[dict[str, str]] | None:
             return None
         skills.append({"name": name, "source": source})
     return skills
-
-
-def _valid_plugins(value: object) -> list[str] | None:
-    if not isinstance(value, list):
-        return None
-    if not all(isinstance(entry, str) for entry in value):
-        return None
-    return list(value)

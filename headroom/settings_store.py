@@ -725,6 +725,17 @@ SETTINGS: tuple[SettingField, ...] = (
         help="JSON object of extra headers merged into (and overriding) forwarded OpenAI requests.",
         tier="advanced",
     ),
+    # --- Code Agent ---
+    SettingField(
+        "HEADROOM_CODE_AGENT_PLUGINS",
+        "code_agent.plugins",
+        "Code agent plugins",
+        "Code Agent",
+        "csv-list",
+        default="headroom-code-agent@headroom-marketplace,headroom@headroom-marketplace",
+        help="Comma-separated Claude Code plugins (<plugin>@<marketplace>) the code agent keeps updated.",
+        tier="advanced",
+    ),
 )
 
 _BY_KEY: dict[str, SettingField] = {f.key: f for f in SETTINGS}

@@ -93,6 +93,7 @@ from headroom.providers.claude import (
     proxy_base_url as _claude_proxy_base_url,
 )
 from headroom.providers.claude.runtime import TOOL_SEARCH_FOUNDRY_DEFAULT
+from headroom.providers.claude.vscode import PROXY_BASE_URL_ENV_KEYS
 from headroom.providers.codex import build_launch_env as _build_codex_launch_env
 from headroom.providers.codex.install import codex_uses_chatgpt_auth
 from headroom.providers.codex.threads import retag_to_headroom, retag_to_native
@@ -3730,11 +3731,7 @@ def _can_unwrap_stop_persistent_manifest(manifest: Any) -> bool:
 
 def _same_port_claude_env_keys(port: int) -> list[str]:
     matches: list[str] = []
-    for key in (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_FOUNDRY_BASE_URL",
-        "ANTHROPIC_VERTEX_BASE_URL",
-    ):
+    for key in PROXY_BASE_URL_ENV_KEYS:
         raw = os.environ.get(key, "").strip()
         if not raw:
             continue

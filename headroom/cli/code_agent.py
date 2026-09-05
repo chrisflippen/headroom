@@ -33,6 +33,7 @@ import click
 from headroom import fsutil
 from headroom._subprocess import run
 from headroom.code_tools import brief, skills_ensure
+from headroom.code_tools.post_edit_check import hook_main, real_runner
 from headroom.providers.claude.vscode import claude_user_settings_path
 
 from .main import main
@@ -447,3 +448,19 @@ def code_agent_brief() -> None:
             }
         )
     )
+
+
+@code_agent_group.command("check")
+def code_agent_check() -> None:
+    """Run the edited file's own type checker and linter, as a PostToolUse hook.
+
+    Reads the hook's stdin JSON, works out which checks the file's project
+    has actually configured, and runs them. Exits 2 with the findings on
+    stderr when any check reports a problem; otherwise exits 0 with nothing
+    printed.
+    """
+    stdin_json = sys.stdin.read()
+    code, message = hook_main(stdin_json, real_runner)
+    if message:
+        click.echo(message, err=True)
+    sys.exit(code)

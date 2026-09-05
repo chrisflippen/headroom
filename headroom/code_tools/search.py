@@ -64,6 +64,9 @@ def resolve_path(raw_path: str, root: Path) -> Path:
     A relative path resolves against ``root``. An absolute path is allowed,
     but it must still land inside ``root``'s tree — anything else is
     refused, so Search can't be used to read files outside the project.
+    A path under ``.git`` is refused too, whether it was written as
+    relative, absolute, or through a symlink — Search and Edit share this
+    check so neither can read or write the repo's own git data.
     """
 
     candidate = Path(raw_path).expanduser()
@@ -71,9 +74,11 @@ def resolve_path(raw_path: str, root: Path) -> Path:
     resolved = target.resolve()
     root_resolved = root.resolve()
     try:
-        resolved.relative_to(root_resolved)
+        rel = resolved.relative_to(root_resolved)
     except ValueError:
         raise PathOutsideRootError(f"path outside root: {raw_path}") from None
+    if rel.parts[:1] == (".git",):
+        raise PathOutsideRootError(f"refused: path under .git: {raw_path}")
     return resolved
 
 

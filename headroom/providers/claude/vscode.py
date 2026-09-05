@@ -20,6 +20,16 @@ _MANAGED_KEYS = (_BASE_URL_KEY, _TOOL_SEARCH_KEY)
 _STATE_FILENAME = ".headroom-vscode-claude.json"
 _STATE_VERSION = 1
 
+# The three env vars that point Claude Code's Anthropic SDK at a proxy
+# instead of the real API, one per auth mode (plain API key, Foundry,
+# Vertex). Shared so every place that needs to detect or bypass Headroom's
+# own proxy checks the same three names.
+PROXY_BASE_URL_ENV_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+)
+
 
 def claude_user_settings_path(
     environ: Mapping[str, str] | None = None, *, platform: str | None = None
@@ -95,6 +105,7 @@ def configure_vscode_claude_settings(path: Path, proxy_url: str) -> str:
     # configurable/default-on policy.
     managed = {_BASE_URL_KEY: proxy_url, _TOOL_SEARCH_KEY: "false"}
 
+    state: dict[str, Any]
     if state_path.exists():
         state = _read_object(state_path, label="Headroom state")
         if state.get("version") != _STATE_VERSION or not isinstance(state.get("previous"), dict):

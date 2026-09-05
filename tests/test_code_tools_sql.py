@@ -69,6 +69,96 @@ def test_query_refuses_non_read_only_statements_before_touching_driver(statement
     assert result.startswith("Refused:")
 
 
+# --- A ";" inside a string literal or a comment is not a second statement ---
+
+
+def test_semicolon_inside_single_quoted_string_is_not_a_second_statement(
+    people_db: Path,
+) -> None:
+    result = sql.query(
+        {"connection": "mydb", "sql": "SELECT id FROM people WHERE name = 'a;b'"},
+        _sqlite_resolver(people_db),
+    )
+
+    assert not result.startswith("Refused:")
+    assert result == "id\n--\n0 rows"
+
+
+def test_escaped_single_quote_does_not_end_the_string_early(people_db: Path) -> None:
+    # The "''" inside the literal is an escaped quote, not the string's end.
+    # A naive split(";") would still get this right here since there is no
+    # real second statement -- this proves the scanner tracks the escape
+    # instead of ending the string one character early and misreading the
+    # rest of the line as SQL.
+    result = sql.query(
+        {"connection": "mydb", "sql": "SELECT id FROM people WHERE name = 'it''s; ok'"},
+        _sqlite_resolver(people_db),
+    )
+
+    assert not result.startswith("Refused:")
+
+
+def test_real_second_statement_after_an_escaped_quote_is_still_refused() -> None:
+    result = sql.query(
+        {
+            "connection": "mydb",
+            "sql": "SELECT * FROM t WHERE x = 'it''s a test'; DROP TABLE t",
+        },
+        _resolver_that_must_not_be_called,
+    )
+
+    assert result == "Refused: only a single statement is allowed, not multiple statements."
+
+
+def test_semicolon_inside_double_quoted_identifier_is_not_a_second_statement(
+    people_db: Path,
+) -> None:
+    result = sql.query(
+        {"connection": "mydb", "sql": 'SELECT "weird;name" FROM people'},
+        _sqlite_resolver(people_db),
+    )
+
+    # The identifier does not exist, so sqlite raises -- but the point here
+    # is that it gets past the statement-count refusal to reach the driver.
+    assert not result.startswith("Refused:")
+
+
+def test_semicolon_inside_line_comment_is_not_a_second_statement(people_db: Path) -> None:
+    result = sql.query(
+        {
+            "connection": "mydb",
+            "sql": "SELECT id FROM people -- a comment with a ; in it\nORDER BY id",
+        },
+        _sqlite_resolver(people_db),
+    )
+
+    assert not result.startswith("Refused:")
+
+
+def test_semicolon_inside_block_comment_is_not_a_second_statement(people_db: Path) -> None:
+    result = sql.query(
+        {
+            "connection": "mydb",
+            "sql": "SELECT id FROM people /* a block comment ; here */ ORDER BY id",
+        },
+        _sqlite_resolver(people_db),
+    )
+
+    assert not result.startswith("Refused:")
+
+
+def test_real_second_statement_after_a_comment_is_still_refused() -> None:
+    result = sql.query(
+        {
+            "connection": "mydb",
+            "sql": "SELECT 1 -- fine\n; DROP TABLE accounts",
+        },
+        _resolver_that_must_not_be_called,
+    )
+
+    assert result == "Refused: only a single statement is allowed, not multiple statements."
+
+
 def test_query_select_returns_expected_rows_as_a_table(people_db: Path) -> None:
     result = sql.query(
         {"connection": "mydb", "sql": "SELECT id, name FROM people ORDER BY id"},

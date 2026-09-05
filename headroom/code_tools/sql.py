@@ -61,11 +61,82 @@ def query(request: dict[str, Any], resolver: Callable[[str], str]) -> str:
     return _render_table(result.columns, result.rows, result.truncated)
 
 
+def _scan_single_quoted(text: str, start: int) -> int:
+    """Return the index just past the closing quote of a `'...'` literal
+    that starts at `start`. `''` inside the literal is an escaped quote, not
+    the end -- so a plain "find the next quote" would stop one character
+    too early. An unterminated literal scans to the end of the text."""
+
+    length = len(text)
+    i = start + 1
+    while i < length:
+        if text[i] == "'":
+            if i + 1 < length and text[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return length
+
+
+def _scan_double_quoted(text: str, start: int) -> int:
+    """Return the index just past the closing quote of a `"..."` identifier
+    that starts at `start`. An unterminated one scans to the end."""
+
+    length = len(text)
+    i = start + 1
+    while i < length:
+        if text[i] == '"':
+            return i + 1
+        i += 1
+    return length
+
+
+def _split_statements(text: str) -> list[str]:
+    """Split `text` into SQL statements at top-level semicolons.
+
+    A `;` inside a single-quoted string, a double-quoted identifier, a `--`
+    line comment, or a `/* ... */` block comment does not end a statement --
+    only a `;` outside all of those does. This is a small hand-rolled
+    scanner, not a full SQL parser, but it covers the punctuation that
+    actually changes where one statement ends and the next begins.
+    """
+
+    length = len(text)
+    statements: list[str] = []
+    piece_start = 0
+    i = 0
+    while i < length:
+        ch = text[i]
+        if ch == "'":
+            i = _scan_single_quoted(text, i)
+            continue
+        if ch == '"':
+            i = _scan_double_quoted(text, i)
+            continue
+        if text.startswith("--", i):
+            newline = text.find("\n", i)
+            i = length if newline == -1 else newline
+            continue
+        if text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = length if close == -1 else close + 2
+            continue
+        if ch == ";":
+            statements.append(text[piece_start:i])
+            i += 1
+            piece_start = i
+            continue
+        i += 1
+    statements.append(text[piece_start:length])
+    return statements
+
+
 def _refuse_unless_read_only(raw_sql: str) -> str | None:
     stripped = raw_sql.strip()
     if not stripped:
         return "Refused: empty SQL statement."
-    statements = [part.strip() for part in stripped.split(";") if part.strip()]
+    statements = [part.strip() for part in _split_statements(stripped) if part.strip()]
     if len(statements) != 1:
         return "Refused: only a single statement is allowed, not multiple statements."
     statement = statements[0]
@@ -181,7 +252,9 @@ def _schema(connection: Any) -> list[tuple[str, list[tuple[str, str]]]]:
     return _postgres_schema_tables(connection)
 
 
-def _sqlite_schema_tables(connection: sqlite3.Connection) -> list[tuple[str, list[tuple[str, str]]]]:
+def _sqlite_schema_tables(
+    connection: sqlite3.Connection,
+) -> list[tuple[str, list[tuple[str, str]]]]:
     cursor = connection.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     table_names = [row[0] for row in cursor.fetchall()]

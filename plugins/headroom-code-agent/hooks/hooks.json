@@ -1,5 +1,5 @@
 {
-  "description": "Headroom code agent hooks — keep the code agent's skills current and add a brief under each prompt.",
+  "description": "Headroom code agent hooks — keep the code agent's skills current, add a brief under each prompt, and run each edited file's own checks after every edit.",
   "hooks": {
     "SessionStart": [
       {
@@ -20,6 +20,28 @@
             "type": "command",
             "command": "headroom code-agent brief",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__headroom__Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent check",
+            "timeout": 150
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent check",
+            "timeout": 150
           }
         ]
       }

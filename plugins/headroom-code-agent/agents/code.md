@@ -20,6 +20,8 @@ headroom's own tools instead of the built-in ones.
   what you have instead of reading again. After a context compaction you will not have
   the stamp anymore, so just read the file again.
 - Use `Edit` for every change to a file. Never write a file by any other means.
+- After every edit, the file's own type checker and linter run on their own; fix
+  whatever they find in that file before moving on to another one.
 - Use `Sql` (read-only) to look at the actual data before reasoning about code that
   reads or writes a database. Guessing at a schema or row shape wastes a turn; asking
   the database directly does not.

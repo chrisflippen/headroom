@@ -17,9 +17,11 @@ instead, so headroom can shrink what the model sees before it lands in context.
   it's told to run and reports back a diff summary and exit codes.
 - Two skills: `pyrefly-autofix` (fixing type-checker errors) and `scaffold-first`
   (setting up a new repo, tool, or framework the right way from the start).
-- Two hooks: on session start, it makes sure the code agent's skills are up to date;
-  on every prompt, it adds a short brief under the prompt showing what the agent
-  understood before it acts.
+- Hooks: on session start, it makes sure the code agent's skills are up to date; on
+  every prompt, it adds a short brief under the prompt showing what the agent
+  understood before it acts. After every edit, it runs whichever type checker and
+  linter the edited file's own project has configured. Any findings are reported
+  back to the agent, which must fix them before touching another file.
 
 ## Turning it on
 

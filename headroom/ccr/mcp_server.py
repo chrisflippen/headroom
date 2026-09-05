@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -845,6 +846,19 @@ class HeadroomMCPServer:
         async def list_tools() -> list[Tool]:
             return self._tool_definitions()
 
+        # One handler per tool name, every one of them ``(arguments) ->
+        # list[TextContent]`` so ``call_tool`` below can dispatch through a
+        # single lookup instead of an if/elif chain. ``_handle_stats`` takes
+        # no arguments, so it gets a thin wrapper that drops them.
+        handlers: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]]]] = {
+            COMPRESS_TOOL_NAME: self._handle_compress,
+            CCR_TOOL_NAME: self._handle_retrieve,
+            STATS_TOOL_NAME: lambda arguments: self._handle_stats(),
+            SEARCH_TOOL_NAME: self._handle_search,
+            EDIT_TOOL_NAME: self._handle_edit,
+            SQL_TOOL_NAME: self._handle_sql,
+        }
+
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             started = time.perf_counter()
@@ -854,25 +868,16 @@ class HeadroomMCPServer:
                 json.dumps(arguments, ensure_ascii=False, default=str),
             )
             try:
-                if name == COMPRESS_TOOL_NAME:
-                    result = await self._handle_compress(arguments)
-                elif name == CCR_TOOL_NAME:
-                    result = await self._handle_retrieve(arguments)
-                elif name == STATS_TOOL_NAME:
-                    result = await self._handle_stats()
-                elif name == SEARCH_TOOL_NAME:
-                    result = await self._handle_search(arguments)
-                elif name == EDIT_TOOL_NAME:
-                    result = await self._handle_edit(arguments)
-                elif name == SQL_TOOL_NAME:
-                    result = await self._handle_sql(arguments)
-                else:
+                handler = handlers.get(name)
+                if handler is None:
                     result = [
                         TextContent(
                             type="text",
                             text=json.dumps({"error": f"Unknown tool: {name}"}),
                         )
                     ]
+                else:
+                    result = await handler(arguments)
                 logger.info(
                     "event=mcp_tool_call_completed tool=%s duration_ms=%.2f output=%s",
                     name,

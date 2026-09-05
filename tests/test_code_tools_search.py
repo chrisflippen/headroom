@@ -182,6 +182,16 @@ def test_missing_file_gives_plain_error(tmp_path: Path) -> None:
     assert result == "error: file not found: nope.py"
 
 
+def test_git_config_path_is_refused(tmp_path: Path) -> None:
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[core]\n")
+
+    result = search({"action": "read", "path": ".git/config"}, root=tmp_path)
+
+    assert result == "error: refused: path under .git: .git/config"
+
+
 def test_directory_path_gives_plain_error(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
 

@@ -33,6 +33,7 @@ from typing import TypeVar
 
 from headroom._subprocess import run
 from headroom.code_tools.search import tracked_files
+from headroom.providers.claude.vscode import PROXY_BASE_URL_ENV_KEYS as _PROXY_ENV_KEYS
 
 # Set on the child `claude -p` process the default model runner spawns, and
 # checked at the top of the `headroom code-agent brief` CLI command. The child
@@ -40,14 +41,6 @@ from headroom.code_tools.search import tracked_files
 # is a second line of defense against a nested UserPromptSubmit hook calling
 # this command again.
 RECURSION_GUARD_ENV = "HEADROOM_BRIEF_ACTIVE"
-
-# Env vars that route Claude Code through a proxy; the brief's helper call
-# drops them so the call goes straight to the API.
-_PROXY_ENV_KEYS = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_FOUNDRY_BASE_URL",
-    "ANTHROPIC_VERTEX_BASE_URL",
-)
 
 _MODEL_NAME = "claude-haiku-4-5-20251001"
 
@@ -403,9 +396,10 @@ def default_model_runner(system: str, user: str, timeout: float) -> str:
     ]
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"
-    # Talk to the API directly, not through the headroom proxy: the proxy adds
-    # memory tools to every request, which turns this one-shot answer into a
-    # tool-calling conversation. Thinking is off for the same reason: speed.
+    # Talk to the API directly, not through the headroom proxy. The proxy adds
+    # memory tools to every request it sees; this call must stay a single
+    # turn, so it skips the proxy instead. Thinking is off for the same
+    # reason: speed.
     for key in _PROXY_ENV_KEYS:
         env.pop(key, None)
     env["MAX_THINKING_TOKENS"] = "0"

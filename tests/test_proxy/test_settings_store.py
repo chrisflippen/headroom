@@ -176,6 +176,20 @@ class TestEffectiveValues:
         assert settings_store.effective_values()["savings_profile"] == "general"
 
 
+class TestCodeAgentPlugins:
+    def test_default_is_the_two_built_in_plugins(self, workspace, monkeypatch):
+        _clear_env(monkeypatch)
+        assert (
+            settings_store.effective_values()["code_agent.plugins"]
+            == "headroom-code-agent@headroom-marketplace,headroom@headroom-marketplace"
+        )
+
+    def test_save_then_load_coerces_a_list_to_a_csv_string(self, workspace, monkeypatch):
+        _clear_env(monkeypatch)
+        settings_store.save({"code_agent.plugins": ["only-plugin@only-marketplace"]})
+        assert settings_store.load() == {"code_agent.plugins": "only-plugin@only-marketplace"}
+
+
 class TestSecretMasking:
     def test_schema_and_stored_mask_secret(self, workspace, monkeypatch):
         _clear_env(monkeypatch)

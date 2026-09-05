@@ -26,23 +26,15 @@ from headroom.code_tools.search import (
 
 
 def _resolve(raw_path: str, root: Path) -> Path | str:
-    """Resolve ``raw_path`` against ``root``, refusing anything outside the
-    root or under ``.git``. Returns the resolved path, or a plain error
-    string a handler can return straight to its caller."""
+    """Resolve ``raw_path`` against ``root`` through Search's ``resolve_path``,
+    which refuses anything outside the root or under ``.git``. Returns the
+    resolved path, or a plain error string a handler can return straight to
+    its caller."""
 
     try:
-        path = resolve_path(raw_path, root)
+        return resolve_path(raw_path, root)
     except PathOutsideRootError as exc:
         return f"error: {exc}"
-
-    try:
-        rel = path.relative_to(root.resolve())
-    except ValueError:
-        rel = None
-    if rel is not None and rel.parts[:1] == (".git",):
-        return f"error: refused: path under .git: {raw_path}"
-
-    return path
 
 
 def _resolve_existing_file(

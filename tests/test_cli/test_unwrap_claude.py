@@ -285,6 +285,7 @@ def test_unwrap_claude_stops_claude_owned_persistent_deployment(
     # then report routing residue that has nothing to do with this test.
     for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
+
     class Manifest:
         profile = "unwrap-2340"
         targets = ["claude"]

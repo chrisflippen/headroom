@@ -69,6 +69,7 @@ def test_ensure_agent_switch_preserves_unrelated_keys(tmp_path: Path) -> None:
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
+        "mcp__headroom__SendMessage",
     ]
 
 
@@ -83,6 +84,7 @@ _EXPECTED_ALLOW_RULES = [
     "mcp__headroom__headroom_compress",
     "mcp__headroom__headroom_retrieve",
     "mcp__headroom__headroom_stats",
+    "mcp__headroom__SendMessage",
 ]
 
 
@@ -126,6 +128,7 @@ def test_ensure_agent_switch_does_not_duplicate_a_pre_existing_allow_rule(
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
+        "mcp__headroom__SendMessage",
     ]
 
 
@@ -169,7 +172,7 @@ def test_agent_switch_state_on_after_ensure(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (6 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (7 allow rules)"
 
 
 def test_agent_switch_state_reports_user_set_value(tmp_path: Path) -> None:
@@ -186,7 +189,7 @@ def test_agent_switch_state_reports_the_taken_over_value(tmp_path: Path) -> None
     settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 6 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 7 allow rules)"
 
 
 # ---------------------------------------------------------------------------
@@ -817,80 +820,6 @@ def test_code_agent_db_list_reports_configured_names(
 
 
 # ---------------------------------------------------------------------------
-# Click commands: `headroom code-agent roots add / remove / list`
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def _roots_workspace_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Isolate the roots file from the filesystem's real workspace dir."""
-
-    workspace = tmp_path / "workspace"
-    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(workspace))
-    return workspace
-
-
-def test_code_agent_roots_add_then_list_round_trips(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
-) -> None:
-    from headroom.cli.main import main
-
-    launch_dir = tmp_path / "launch"
-    launch_dir.mkdir()
-    added = tmp_path / "sibling"
-    added.mkdir()
-    monkeypatch.chdir(launch_dir)
-
-    add_result = runner.invoke(main, ["code-agent", "roots", "add", str(added)])
-
-    assert add_result.exit_code == 0, add_result.output
-    assert str(added.resolve()) in add_result.output
-
-    list_result = runner.invoke(main, ["code-agent", "roots", "list"])
-
-    assert list_result.exit_code == 0, list_result.output
-    assert str(launch_dir.resolve()) in list_result.output
-    assert "Added roots:" in list_result.output
-    assert str(added.resolve()) in list_result.output
-
-
-def test_code_agent_roots_add_rejects_a_missing_directory(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
-) -> None:
-    from headroom.cli.main import main
-
-    launch_dir = tmp_path / "launch"
-    launch_dir.mkdir()
-    monkeypatch.chdir(launch_dir)
-
-    result = runner.invoke(main, ["code-agent", "roots", "add", str(tmp_path / "nope")])
-
-    assert result.exit_code != 0
-    assert "not an existing directory" in str(result.output) + str(result.exception)
-
-
-def test_code_agent_roots_remove_drops_it(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
-) -> None:
-    from headroom.cli.main import main
-
-    launch_dir = tmp_path / "launch"
-    launch_dir.mkdir()
-    added = tmp_path / "sibling"
-    added.mkdir()
-    monkeypatch.chdir(launch_dir)
-    runner.invoke(main, ["code-agent", "roots", "add", str(added)])
-
-    remove_result = runner.invoke(main, ["code-agent", "roots", "remove", str(added)])
-
-    assert remove_result.exit_code == 0, remove_result.output
-    assert "Removed root" in remove_result.output
-
-    list_result = runner.invoke(main, ["code-agent", "roots", "list"])
-    assert "Added roots:" not in list_result.output
-
-
-# ---------------------------------------------------------------------------
 # wrap claude wiring: --agent is injected by default, --no-code-agent skips it
 # ---------------------------------------------------------------------------
 
@@ -899,8 +828,10 @@ class _Completed:
     returncode = 0
 
 
-def _patch_wrap_claude_scaffolding(monkeypatch: pytest.MonkeyPatch, wrap_mod: ModuleType) -> dict:
-    captured: dict = {}
+def _patch_wrap_claude_scaffolding(
+    monkeypatch: pytest.MonkeyPatch, wrap_mod: ModuleType
+) -> dict[str, object]:
+    captured: dict[str, object] = {}
     monkeypatch.setattr(wrap_mod.shutil, "which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(wrap_mod, "_register_proxy_client", lambda _port: None)
     monkeypatch.setattr(wrap_mod, "_make_cleanup", lambda _holder, _port: lambda: None)

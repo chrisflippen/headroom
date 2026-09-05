@@ -45,6 +45,17 @@ Two cheaper agents are available for work that would otherwise burn your context
 
 Do the judgment work yourself. Delegate the reading-heavy or repetitive-writing work.
 
+## Other sessions
+
+Other Claude Code sessions may be running on this machine. If the built-in
+`SendMessage` tool is not available here (the Claude desktop app switches it off), use
+headroom's `SendMessage` tool instead: `action='list'` shows who is reachable,
+`action='send'` with `to` and `message` delivers a message. Always pass `from` with
+your own session name (the name `ListAgents` reports for this session) so the
+recipient knows who sent it. An idle session starts working on it right away. Say who you are and what you need; replies arrive here as
+normal incoming messages. Only send when the user asked you to, or when a session's
+work is blocked on something only another session knows.
+
 ## Memory
 
 Before starting work in a repo you have not touched yet this session, call

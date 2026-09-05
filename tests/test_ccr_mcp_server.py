@@ -644,3 +644,69 @@ def test_call_tool_search_reads_a_file_in_a_sibling_worktree(
     text = response[0].kwargs["text"]
     assert "print('from sibling worktree')" in text
     assert "stamp=" in text
+
+
+# ---------------------------------------------------------------------------
+# SendMessage: messaging another Claude Code session on this machine
+# ---------------------------------------------------------------------------
+
+
+def _write_session_entry(sessions_dir: Path, pid: int, name: str) -> None:
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    (sessions_dir / f"{pid}.json").write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "sessionId": f"session-{pid}",
+                "cwd": f"/work/{name}",
+                "name": name,
+                "status": "idle",
+                "messagingSocketPath": f"/tmp/cc-socks/{pid}.sock",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_send_message_tool_is_registered() -> None:
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    tools = server._tool_definitions()
+    tool = next(t for t in tools if t.kwargs["name"] == "SendMessage")
+
+    schema = tool.kwargs["inputSchema"]
+    assert schema["properties"]["action"]["enum"] == ["send", "list"]
+    for field in ["to", "message"]:
+        assert field in schema["properties"]
+    assert len(tool.kwargs["description"].split()) < 120
+
+
+def test_handle_send_message_lists_peers_from_the_session_registry(tmp_path: Path) -> None:
+    _write_session_entry(tmp_path, 100, "alpha")
+    _write_session_entry(tmp_path, 400, "me")
+
+    server = mcp_server.HeadroomMCPServer(
+        check_proxy=False, sessions_dir=tmp_path, session_pid=400, pid_alive=lambda pid: True
+    )
+    response = asyncio.run(server._handle_send_message({"action": "list"}))
+
+    text = response[0].kwargs["text"]
+    assert "alpha" in text
+    assert "- me" not in text
+
+
+def test_call_tool_send_message_reaches_the_messaging_module(tmp_path: Path) -> None:
+    """``call_tool`` (the MCP dispatch entry point) routes SendMessage to
+    code_tools.messaging, and an unknown recipient comes back as a plain
+    refusal naming the sessions that are reachable."""
+    _write_session_entry(tmp_path, 100, "alpha")
+
+    server = mcp_server.HeadroomMCPServer(
+        check_proxy=False, sessions_dir=tmp_path, session_pid=400, pid_alive=lambda pid: True
+    )
+    response = asyncio.run(
+        server._call_tool_handler("SendMessage", {"to": "nope", "message": "hello"})
+    )
+
+    text = response[0].kwargs["text"]
+    assert text.startswith("Refused:")
+    assert "nope" in text and "alpha" in text

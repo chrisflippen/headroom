@@ -205,16 +205,26 @@ def ensure_agent_switch(settings_path: Path, agent: str = DEFAULT_AGENT) -> bool
     current = payload.get(_AGENT_KEY)
     managed = _managed_agent_entry(payload)
 
+    managed_all = payload.get(_MANAGED_KEY)
+    if not isinstance(managed_all, dict):
+        managed_all = {}
+
     if current == agent and managed is not None:
-        return False
+        # Already on. A switch written before the permission grant existed
+        # still needs the rules, so add any that are missing and stop there.
+        added_rules = _add_allow_rules(payload)
+        if not added_rules:
+            return False
+        recorded = managed_all.get(_PERMISSIONS_ADDED_KEY)
+        recorded_list = recorded if isinstance(recorded, list) else []
+        managed_all[_PERMISSIONS_ADDED_KEY] = recorded_list + added_rules
+        payload[_MANAGED_KEY] = managed_all
+        _write_settings(settings_path, payload)
+        return True
 
     previous = managed.get("previous") if managed is not None else current
     payload[_AGENT_KEY] = agent
     added_rules = _add_allow_rules(payload)
-
-    managed_all = payload.get(_MANAGED_KEY)
-    if not isinstance(managed_all, dict):
-        managed_all = {}
     managed_all[_AGENT_KEY] = {"previous": previous}
     managed_all[_PERMISSIONS_ADDED_KEY] = added_rules
     payload[_MANAGED_KEY] = managed_all

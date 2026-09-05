@@ -1102,3 +1102,26 @@ def test_skills_ensure_runner_caps_the_subprocess_timeout_at_25_seconds(
     code_agent._skills_ensure_runner(["npx", "skills", "update", "-g", "-y"])
 
     assert captured["timeout"] == 25
+
+
+def test_ensure_adds_missing_allow_rules_when_the_switch_is_already_on(tmp_path: Path) -> None:
+    """A switch written before the permission grant existed still gets the rules."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "agent": code_agent.DEFAULT_AGENT,
+                "_headroom_managed": {"agent": {"previous": "woz:code-free"}},
+                "permissions": {"allow": ["Bash(git *)"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert code_agent.ensure_agent_switch(settings) is True
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert data["permissions"]["allow"][0] == "Bash(git *)"
+    assert set(code_agent.CODE_AGENT_ALLOW_RULES) <= set(data["permissions"]["allow"])
+    assert data["_headroom_managed"]["permissions_added"] == list(code_agent.CODE_AGENT_ALLOW_RULES)
+    assert data["_headroom_managed"]["agent"] == {"previous": "woz:code-free"}
+    assert code_agent.ensure_agent_switch(settings) is False

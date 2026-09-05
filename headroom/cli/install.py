@@ -14,7 +14,7 @@ import click
 from click.core import ParameterSource
 
 from headroom._subprocess import run
-from headroom.install.health import probe_json, probe_ready
+from headroom.install.health import probe_alive, probe_json, probe_ready
 from headroom.install.models import (
     ConfigScope,
     DeploymentManifest,
@@ -155,6 +155,16 @@ def _start_deployment(manifest: DeploymentManifest, *, assume_start_lock: bool =
             return
 
     if probe_ready(manifest.health_url):
+        return
+    if probe_alive(manifest.health_url):
+        # A headroom proxy already holds the port -- it just can't reach the
+        # upstream right now. Starting a second process here would only fail
+        # to bind and exit immediately, then get retried forever by whatever
+        # supervisor invoked us (#2249).
+        click.echo(
+            f"Deployment '{manifest.profile}' is alive on port {manifest.port} "
+            "(upstream not ready yet); not restarting."
+        )
         return
     if manifest.preset == InstallPreset.PERSISTENT_DOCKER.value and shutil.which("docker") is None:
         raise click.ClickException(
@@ -923,6 +933,16 @@ def install_agent_ensure(profile: str) -> None:
     if probe_ready(manifest.health_url):
         click.echo(f"Deployment '{profile}' is already healthy.")
         return
+    if probe_alive(manifest.health_url):
+        # A headroom proxy is already bound to the port; it just can't reach
+        # the upstream yet. Never spawn a second one on top of it -- that one
+        # would fail to bind and exit immediately, and a KeepAlive/interval
+        # supervisor would just call `ensure` again and repeat forever (#2249).
+        click.echo(
+            f"Deployment '{profile}' is alive on port {manifest.port} "
+            "(upstream not ready yet); not restarting."
+        )
+        return
     with acquire_runtime_start_lock(manifest.profile) as acquired:
         if not acquired:
             click.echo(f"Deployment '{profile}' start is already in progress.")
@@ -931,6 +951,12 @@ def install_agent_ensure(profile: str) -> None:
         # started the runtime while we waited for the lock.
         if probe_ready(manifest.health_url):
             click.echo(f"Deployment '{profile}' is already healthy.")
+            return
+        if probe_alive(manifest.health_url):
+            click.echo(
+                f"Deployment '{profile}' is alive on port {manifest.port} "
+                "(upstream not ready yet); not restarting."
+            )
             return
         if runtime_status(manifest) == "running":
             # Runtime exists but isn't ready yet — give it a grace period

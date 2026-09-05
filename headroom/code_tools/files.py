@@ -31,6 +31,24 @@ class PathOutsideRootError(ValueError):
     """Raised when a request path resolves to somewhere outside the root."""
 
 
+def _find_containing_root(resolved: Path, root: Path) -> Path | None:
+    """Return whichever ``allowed_roots(root)`` entry contains ``resolved``
+    (already an absolute, resolved path), or ``None`` if none does.
+
+    The resolve/relative_to/except loop shared by ``resolve_path``,
+    ``root_containing``, and (through it) ``display_path``.
+    """
+
+    for allowed in allowed_roots(root):
+        allowed_resolved = allowed.resolve()
+        try:
+            resolved.relative_to(allowed_resolved)
+        except ValueError:
+            continue
+        return allowed_resolved
+    return None
+
+
 def resolve_path(raw_path: str, root: Path) -> Path:
     """Resolve a request path against ``root``, the launch directory.
 
@@ -49,16 +67,12 @@ def resolve_path(raw_path: str, root: Path) -> Path:
     candidate = Path(raw_path).expanduser()
     target = candidate if candidate.is_absolute() else root / candidate
     resolved = target.resolve()
-    for allowed in allowed_roots(root):
-        allowed_resolved = allowed.resolve()
-        try:
-            rel = resolved.relative_to(allowed_resolved)
-        except ValueError:
-            continue
-        if rel.parts[:1] == (".git",):
-            raise PathOutsideRootError(f"refused: path under .git: {raw_path}")
-        return resolved
-    raise PathOutsideRootError(f"path outside root: {raw_path}")
+    containing = _find_containing_root(resolved, root)
+    if containing is None:
+        raise PathOutsideRootError(f"path outside root: {raw_path}")
+    if resolved.relative_to(containing).parts[:1] == (".git",):
+        raise PathOutsideRootError(f"refused: path under .git: {raw_path}")
+    return resolved
 
 
 def root_containing(resolved: Path, root: Path) -> Path:
@@ -70,14 +84,7 @@ def root_containing(resolved: Path, root: Path) -> Path:
     gets a usable root rather than an exception."""
 
     resolved = resolved.resolve()
-    for allowed in allowed_roots(root):
-        allowed_resolved = allowed.resolve()
-        try:
-            resolved.relative_to(allowed_resolved)
-        except ValueError:
-            continue
-        return allowed_resolved
-    return root.resolve()
+    return _find_containing_root(resolved, root) or root.resolve()
 
 
 def display_path(resolved: Path, root: Path) -> str:

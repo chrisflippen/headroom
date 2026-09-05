@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import threading
-from collections import OrderedDict
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
+
+from headroom.proxy._bounded_session_map import BoundedSessionMap
 
 if TYPE_CHECKING:
     from headroom.proxy.session_tool_store import SessionToolStore
 
 
-class SessionCcrTracker:
+class SessionCcrTracker(BoundedSessionMap["tuple[bool, bytes | None]"]):
     """Bounded LRU tracker recording per-provider/session CCR state.
 
     When constructed with a `store`, the tracker hydrates its in-memory
@@ -20,29 +21,11 @@ class SessionCcrTracker:
     to the original pure in-memory tracker.
     """
 
-    def __init__(self, max_sessions: int, store: SessionToolStore | None = None) -> None:
-        if max_sessions <= 0:
-            raise ValueError("max_sessions must be > 0")
-        self._max_sessions = max_sessions
-        self._lock = threading.RLock()
-        self._store = store
-        self._sessions: OrderedDict[tuple[str, str], tuple[bool, bytes | None]] = OrderedDict()
-        if store is not None:
-            self._hydrate(store)
-
-    def _hydrate(self, store: SessionToolStore) -> None:
+    def _load_entries(
+        self, store: SessionToolStore
+    ) -> Iterable[tuple[tuple[str, str], tuple[bool, bytes | None]]]:
         for provider, session_id, golden_bytes in store.load_all_ccr_sessions(self._max_sessions):
-            self._sessions[self._key(provider, session_id)] = (True, golden_bytes)
-        while len(self._sessions) > self._max_sessions:
-            self._sessions.popitem(last=False)
-
-    @property
-    def active_sessions(self) -> int:
-        with self._lock:
-            return len(self._sessions)
-
-    def _key(self, provider: str, session_id: str) -> tuple[str, str]:
-        return (provider, session_id)
+            yield self._key(provider, session_id), (True, golden_bytes)
 
     def has_done_ccr(self, provider: str, session_id: str) -> bool:
         """Return True when this session has previously performed CCR."""
@@ -97,8 +80,7 @@ class SessionCcrTracker:
                 pinned = existing[1] if existing[1] is not None else golden_tool_bytes
             self._sessions[key] = (True, pinned)
             self._sessions.move_to_end(key)
-            while len(self._sessions) > self._max_sessions:
-                self._sessions.popitem(last=False)
+            self._bound()
             if self._store is not None:
                 self._store.record_ccr_done(
                     provider=provider,
@@ -106,9 +88,3 @@ class SessionCcrTracker:
                     golden_bytes=pinned,
                     max_sessions=self._max_sessions,
                 )
-
-    def reset(self) -> None:
-        """Clear all session state."""
-
-        with self._lock:
-            self._sessions.clear()

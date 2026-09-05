@@ -2029,6 +2029,17 @@ def get_tool_tracker_max_sessions() -> int:
     return _get_tool_tracker_max_sessions()
 
 
+def _resolve_tracker_max_sessions(max_sessions: int | None) -> int:
+    """Fall back to the env-bound default when a tracker wrapper's caller
+    didn't pin a `max_sessions`. Shared by `SessionToolTracker.__init__`
+    and `SessionCcrTracker.__init__` below, which were otherwise identical
+    bodies."""
+
+    if max_sessions is None:
+        return get_tool_tracker_max_sessions()
+    return max_sessions
+
+
 def serialize_tool_definition_canonical(tool_definition: dict[str, Any]) -> bytes:
     """Deterministic byte serialization of a single memory tool definition.
 
@@ -2054,9 +2065,7 @@ class SessionToolTracker(_SessionToolTracker):
         max_sessions: int | None = None,
         store: SessionToolStore | None = None,
     ) -> None:
-        if max_sessions is None:
-            max_sessions = get_tool_tracker_max_sessions()
-        super().__init__(max_sessions=max_sessions, store=store)
+        super().__init__(max_sessions=_resolve_tracker_max_sessions(max_sessions), store=store)
 
 
 def _open_default_session_tool_store() -> SessionToolStore | None:
@@ -2350,9 +2359,7 @@ class SessionCcrTracker(_SessionCcrTracker):
         max_sessions: int | None = None,
         store: SessionToolStore | None = None,
     ) -> None:
-        if max_sessions is None:
-            max_sessions = get_tool_tracker_max_sessions()
-        super().__init__(max_sessions=max_sessions, store=store)
+        super().__init__(max_sessions=_resolve_tracker_max_sessions(max_sessions), store=store)
 
 
 # Process-wide singleton.

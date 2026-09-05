@@ -173,18 +173,10 @@ class RequestLogger:
         # use stays bounded. We mutate the dataclass fields rather
         # than wrapping the entry to keep ``get_recent`` /
         # ``get_recent_with_messages`` unchanged.
-        if entry.request_messages is not None:
-            entry.request_messages = truncate_stored_text(
-                redact_image_base64(entry.request_messages)
-            )
-        if entry.compressed_messages is not None:
-            entry.compressed_messages = truncate_stored_text(
-                redact_image_base64(entry.compressed_messages)
-            )
-        if entry.response_content is not None:
-            entry.response_content = truncate_stored_text(
-                redact_image_base64(entry.response_content)
-            )
+        for field in ("request_messages", "compressed_messages", "response_content"):
+            value = getattr(entry, field)
+            if value is not None:
+                setattr(entry, field, truncate_stored_text(redact_image_base64(value)))
 
         has_body = (
             entry.request_messages is not None

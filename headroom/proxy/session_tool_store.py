@@ -21,7 +21,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,12 @@ CREATE TABLE IF NOT EXISTS ccr_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_ccr_sessions_last_seen ON ccr_sessions (last_seen);
 """
+
+# The only two tables `_prune` ever runs against — never interpolated from
+# anything outside this module, so building the DELETE/SELECT statements
+# with an f-string below is safe.
+_MEMORY_TABLE: Literal["memory_tool_defs"] = "memory_tool_defs"
+_CCR_TABLE: Literal["ccr_sessions"] = "ccr_sessions"
 
 
 def default_db_path() -> Path:
@@ -102,6 +111,22 @@ class SessionToolStore:
         """True when the backing sqlite connection is open and usable."""
         return self._conn is not None
 
+    @contextmanager
+    def _guard(self) -> Iterator[None]:
+        """Run a block of sqlite calls, turning any failure into the
+        store's standard log-once-and-continue-in-memory-only behavior.
+
+        Shared by every public method below instead of each repeating its
+        own ``try: ... except Exception: self._warn(exc)``. A caller whose
+        method returns a value initializes it before the ``with`` block;
+        on failure the block is abandoned partway through and that
+        already-initialized value is what gets returned.
+        """
+        try:
+            yield
+        except Exception as exc:  # noqa: BLE001 - any sqlite/OS failure is non-fatal
+            self._warn(exc)
+
     # ------------------------------------------------------------------
     # Memory tool rows (`SessionToolTracker`)
     # ------------------------------------------------------------------
@@ -125,7 +150,7 @@ class SessionToolStore:
         if self._conn is None:
             return
         now = time.time()
-        try:
+        with self._guard():
             self._conn.execute(
                 "INSERT OR IGNORE INTO memory_tool_defs "
                 "(provider, session_id, tool_name, golden_bytes, position, last_seen) "
@@ -137,9 +162,7 @@ class SessionToolStore:
                 (now, provider, session_id),
             )
             self._conn.commit()
-            self._prune_memory_sessions(max_sessions)
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
+            self._prune(_MEMORY_TABLE, max_sessions)
 
     def load_all_memory_tools(
         self, max_sessions: int
@@ -153,7 +176,8 @@ class SessionToolStore:
         """
         if self._conn is None:
             return []
-        try:
+        result: list[tuple[str, str, list[tuple[str, bytes]]]] = []
+        with self._guard():
             session_rows = self._conn.execute(
                 "SELECT provider, session_id FROM ("
                 "  SELECT provider, session_id, MAX(last_seen) AS last_seen "
@@ -161,7 +185,6 @@ class SessionToolStore:
                 ") ORDER BY last_seen DESC LIMIT ?",
                 (max_sessions,),
             ).fetchall()
-            result: list[tuple[str, str, list[tuple[str, bytes]]]] = []
             for provider, session_id in reversed(session_rows):
                 tool_rows = self._conn.execute(
                     "SELECT tool_name, golden_bytes FROM memory_tool_defs "
@@ -169,31 +192,29 @@ class SessionToolStore:
                     (provider, session_id),
                 ).fetchall()
                 result.append((provider, session_id, [(n, bytes(b)) for n, b in tool_rows]))
-            return result
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
-            return []
+        return result
 
-    def _prune_memory_sessions(self, max_sessions: int) -> None:
+    def _prune(self, table: Literal["memory_tool_defs", "ccr_sessions"], max_sessions: int) -> None:
+        """Delete every session in ``table`` past the ``max_sessions``
+        most-recently-seen, shared by both the memory-tool and CCR rows."""
+
         if self._conn is None:
             return
-        try:
+        with self._guard():
             rows = self._conn.execute(
                 "SELECT provider, session_id FROM ("
                 "  SELECT provider, session_id, MAX(last_seen) AS last_seen "
-                "  FROM memory_tool_defs GROUP BY provider, session_id"
+                f"  FROM {table} GROUP BY provider, session_id"
                 ") ORDER BY last_seen DESC"
             ).fetchall()
             if len(rows) <= max_sessions:
                 return
             for provider, session_id in rows[max_sessions:]:
                 self._conn.execute(
-                    "DELETE FROM memory_tool_defs WHERE provider = ? AND session_id = ?",
+                    f"DELETE FROM {table} WHERE provider = ? AND session_id = ?",
                     (provider, session_id),
                 )
             self._conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
 
     # ------------------------------------------------------------------
     # CCR session rows (`SessionCcrTracker`)
@@ -216,49 +237,28 @@ class SessionToolStore:
         if self._conn is None:
             return
         now = time.time()
-        try:
+        with self._guard():
             self._conn.execute(
                 "INSERT OR REPLACE INTO ccr_sessions "
                 "(provider, session_id, golden_bytes, last_seen) VALUES (?, ?, ?, ?)",
                 (provider, session_id, golden_bytes, now),
             )
             self._conn.commit()
-            self._prune_ccr_sessions(max_sessions)
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
+            self._prune(_CCR_TABLE, max_sessions)
 
     def load_all_ccr_sessions(self, max_sessions: int) -> list[tuple[str, str, bytes]]:
         """Return the `max_sessions` most-recently-seen CCR sessions, oldest first."""
         if self._conn is None:
             return []
-        try:
+        result: list[tuple[str, str, bytes]] = []
+        with self._guard():
             rows = self._conn.execute(
                 "SELECT provider, session_id, golden_bytes FROM ccr_sessions "
                 "ORDER BY last_seen DESC LIMIT ?",
                 (max_sessions,),
             ).fetchall()
-            return [(p, s, bytes(b)) for p, s, b in reversed(rows)]
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
-            return []
-
-    def _prune_ccr_sessions(self, max_sessions: int) -> None:
-        if self._conn is None:
-            return
-        try:
-            rows = self._conn.execute(
-                "SELECT provider, session_id FROM ccr_sessions ORDER BY last_seen DESC"
-            ).fetchall()
-            if len(rows) <= max_sessions:
-                return
-            for provider, session_id in rows[max_sessions:]:
-                self._conn.execute(
-                    "DELETE FROM ccr_sessions WHERE provider = ? AND session_id = ?",
-                    (provider, session_id),
-                )
-            self._conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            self._warn(exc)
+            result = [(p, s, bytes(b)) for p, s, b in reversed(rows)]
+        return result
 
     def close(self) -> None:
         """Close the backing connection, if open. Mainly for tests."""

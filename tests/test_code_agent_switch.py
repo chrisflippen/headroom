@@ -13,7 +13,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from headroom import paths
 from headroom.cli import code_agent
+from headroom.code_tools import connections
 
 # ---------------------------------------------------------------------------
 # ensure_agent_switch
@@ -207,6 +209,70 @@ def test_agent_launch_args_custom_name() -> None:
 
 
 # ---------------------------------------------------------------------------
+# launch_plan
+# ---------------------------------------------------------------------------
+
+
+def test_launch_plan_prepends_default_agent_when_none_given(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+
+    plan = code_agent.launch_plan([], tmp_path, settings_path)
+
+    assert plan.args == ("--agent", "headroom-code-agent:code")
+    assert plan.warning is None
+
+
+def test_launch_plan_respects_explicit_agent_flag(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+
+    plan = code_agent.launch_plan(["--agent", "my-plugin:custom"], tmp_path, settings_path)
+
+    assert plan.args == ("--agent", "my-plugin:custom")
+    assert plan.warning is None
+
+
+def test_launch_plan_warns_on_conflicting_project_agent_override(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+    project_dir = tmp_path / "project"
+    (project_dir / ".claude").mkdir(parents=True)
+    (project_dir / ".claude" / "settings.json").write_text(json.dumps({"agent": "team:custom"}))
+
+    plan = code_agent.launch_plan([], project_dir, settings_path)
+
+    assert plan.args == ("--agent", "headroom-code-agent:code")
+    assert plan.warning == (
+        "Project sets agent=team:custom (this overrides the Headroom code agent switch)."
+    )
+
+
+def test_launch_plan_no_warning_when_project_agrees_with_default(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+    project_dir = tmp_path / "project"
+    (project_dir / ".claude").mkdir(parents=True)
+    (project_dir / ".claude" / "settings.json").write_text(
+        json.dumps({"agent": "headroom-code-agent:code"})
+    )
+
+    plan = code_agent.launch_plan([], project_dir, settings_path)
+
+    assert plan.warning is None
+
+
+def test_launch_plan_uses_the_user_set_agent_when_the_switch_is_user_set(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"agent": "my-plugin:custom"}) + "\n")
+
+    plan = code_agent.launch_plan([], tmp_path, settings_path)
+
+    assert plan.args == ("--agent", "my-plugin:custom")
+    assert plan.warning is None
+
+
+# ---------------------------------------------------------------------------
 # install_plugin / remove_plugin / marketplace_source
 # ---------------------------------------------------------------------------
 
@@ -265,6 +331,86 @@ def test_marketplace_source_prefers_local_checkout(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(code_agent, "_local_checkout_source", lambda: "/some/repo/checkout")
 
     assert code_agent.marketplace_source() == "/some/repo/checkout"
+
+
+# ---------------------------------------------------------------------------
+# installed_plugins_path / plugin_installed / ensure_plugin_installed
+# ---------------------------------------------------------------------------
+
+
+def test_installed_plugins_path_sits_next_to_settings_file(tmp_path: Path) -> None:
+    settings_path = tmp_path / ".claude" / "settings.json"
+
+    result = code_agent.installed_plugins_path(settings_path)
+
+    assert result == tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+
+
+def test_plugin_installed_false_when_registry_file_is_missing(tmp_path: Path) -> None:
+    registry_path = tmp_path / "installed_plugins.json"
+
+    assert code_agent.plugin_installed(registry_path) is False
+
+
+def test_plugin_installed_false_when_plugin_key_is_absent(tmp_path: Path) -> None:
+    registry_path = tmp_path / "installed_plugins.json"
+    registry_path.write_text(json.dumps({"version": 2, "plugins": {"other@marketplace": [{}]}}))
+
+    assert code_agent.plugin_installed(registry_path) is False
+
+
+def test_plugin_installed_false_when_plugin_entry_is_an_empty_list(tmp_path: Path) -> None:
+    registry_path = tmp_path / "installed_plugins.json"
+    registry_path.write_text(
+        json.dumps({"version": 2, "plugins": {"headroom-code-agent@headroom-marketplace": []}})
+    )
+
+    assert code_agent.plugin_installed(registry_path) is False
+
+
+def test_plugin_installed_true_when_plugin_entry_is_present(tmp_path: Path) -> None:
+    registry_path = tmp_path / "installed_plugins.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "headroom-code-agent@headroom-marketplace": [
+                        {"scope": "user", "version": "1.0.0"}
+                    ]
+                },
+            }
+        )
+    )
+
+    assert code_agent.plugin_installed(registry_path) is True
+
+
+def test_ensure_plugin_installed_skips_install_when_probe_says_present() -> None:
+    calls: list[list[str]] = []
+
+    code_agent.ensure_plugin_installed(calls.append, "chrisflippen/headroom", lambda: True)
+
+    assert calls == []
+
+
+def test_ensure_plugin_installed_installs_when_probe_says_missing() -> None:
+    calls: list[list[str]] = []
+
+    code_agent.ensure_plugin_installed(calls.append, "chrisflippen/headroom", lambda: False)
+
+    assert calls == [
+        ["claude", "plugin", "marketplace", "remove", "headroom-marketplace"],
+        ["claude", "plugin", "marketplace", "add", "chrisflippen/headroom"],
+        [
+            "claude",
+            "plugin",
+            "install",
+            "headroom-code-agent@headroom-marketplace",
+            "--scope",
+            "user",
+        ],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +555,133 @@ def test_code_agent_remove_reports_what_it_removed(
 
 
 # ---------------------------------------------------------------------------
+# Click commands: `headroom code-agent db add / remove / list`
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _connections_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Isolate the connections config file from the filesystem's real one."""
+
+    monkeypatch.setenv(paths.HEADROOM_CONFIG_DIR_ENV, str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def db_keychain(monkeypatch: pytest.MonkeyPatch) -> connections.MemoryKeychain:
+    """A MemoryKeychain injected in place of the real macOS keychain."""
+
+    store = connections.MemoryKeychain()
+    monkeypatch.setattr(code_agent, "_default_keychain", lambda: store)
+    return store
+
+
+def test_code_agent_db_add_prints_only_the_name_and_kind(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    result = runner.invoke(
+        main, ["code-agent", "db", "add", "warehouse", "postgres://user:hunter2@host/db"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Added connection 'warehouse' (postgres)" in result.output
+    assert "hunter2" not in result.output
+    assert connections.list_connections() == ["warehouse"]
+    assert db_keychain.get_secret(connections.KEYCHAIN_SERVICE, "warehouse") == (
+        "postgres://user:hunter2@host/db"
+    )
+
+
+def test_code_agent_db_add_reports_updated_for_an_existing_name(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    connections.add_connection("warehouse", "sqlite:///first.db", db_keychain)
+
+    result = runner.invoke(main, ["code-agent", "db", "add", "warehouse", "sqlite:///second.db"])
+
+    assert result.exit_code == 0, result.output
+    assert "Updated connection 'warehouse' (sqlite)" in result.output
+
+
+def test_code_agent_db_add_rejects_an_unsupported_scheme(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    result = runner.invoke(main, ["code-agent", "db", "add", "warehouse", "mysql://host/db"])
+
+    assert result.exit_code != 0
+    assert connections.list_connections() == []
+
+
+def test_code_agent_db_remove_removes_a_known_connection(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    connections.add_connection("warehouse", "sqlite:///first.db", db_keychain)
+
+    result = runner.invoke(main, ["code-agent", "db", "remove", "warehouse"])
+
+    assert result.exit_code == 0, result.output
+    assert "Removed connection 'warehouse'" in result.output
+    assert connections.list_connections() == []
+
+
+def test_code_agent_db_remove_reports_an_unknown_name(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    result = runner.invoke(main, ["code-agent", "db", "remove", "nope"])
+
+    assert result.exit_code == 0, result.output
+    assert "No connection reference named 'nope'" in result.output
+
+
+def test_code_agent_db_list_reports_no_connections(
+    runner: CliRunner, _connections_config_dir: Path
+) -> None:
+    from headroom.cli.main import main
+
+    result = runner.invoke(main, ["code-agent", "db", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "No connections are configured." in result.output
+
+
+def test_code_agent_db_list_reports_configured_names(
+    runner: CliRunner,
+    _connections_config_dir: Path,
+    db_keychain: connections.MemoryKeychain,
+) -> None:
+    from headroom.cli.main import main
+
+    connections.add_connection("warehouse", "sqlite:///first.db", db_keychain)
+    connections.add_connection("reporting", "sqlite:///second.db", db_keychain)
+
+    result = runner.invoke(main, ["code-agent", "db", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "reporting" in result.output
+    assert "warehouse" in result.output
+
+
+# ---------------------------------------------------------------------------
 # wrap claude wiring: --agent is injected by default, --no-code-agent skips it
 # ---------------------------------------------------------------------------
 
@@ -444,6 +717,14 @@ def _patch_wrap_claude_scaffolding(monkeypatch: pytest.MonkeyPatch, wrap_mod) ->
         return _Completed()
 
     monkeypatch.setattr(wrap_mod.subprocess, "run", fake_run)
+
+    # The plugin is already installed by default, so the ordinary wiring
+    # tests never see an install attempt. Tests that care about the install
+    # path override `plugin_installed` themselves and read this list.
+    plugin_runner_calls: list[list[str]] = []
+    monkeypatch.setattr(code_agent, "_claude_runner", plugin_runner_calls.append)
+    monkeypatch.setattr(code_agent, "plugin_installed", lambda *_a, **_k: True)
+    captured["plugin_runner_calls"] = plugin_runner_calls
     return captured
 
 
@@ -511,6 +792,60 @@ def test_wrap_claude_no_code_agent_flag_skips_injection(
     assert result.exit_code == 0, result.output
     assert captured["child_cmd"] == ["/usr/bin/claude"]
     assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_wrap_claude_installs_plugin_when_probe_says_missing(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from headroom.cli import wrap as wrap_mod
+    from headroom.cli.main import main
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.chdir(tmp_path)
+    _clear_claude_mode_env(monkeypatch)
+    captured = _patch_wrap_claude_scaffolding(monkeypatch, wrap_mod)
+    monkeypatch.setattr(code_agent, "plugin_installed", lambda *_a, **_k: False)
+    monkeypatch.setattr(code_agent, "marketplace_source", lambda: "chrisflippen/headroom")
+
+    result = runner.invoke(
+        main, ["wrap", "claude", "--no-mcp", "--no-tokensave", "--no-serena"], env={}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["plugin_runner_calls"] == [
+        ["claude", "plugin", "marketplace", "remove", "headroom-marketplace"],
+        ["claude", "plugin", "marketplace", "add", "chrisflippen/headroom"],
+        [
+            "claude",
+            "plugin",
+            "install",
+            "headroom-code-agent@headroom-marketplace",
+            "--scope",
+            "user",
+        ],
+    ]
+
+
+def test_wrap_claude_skips_install_when_probe_says_present(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from headroom.cli import wrap as wrap_mod
+    from headroom.cli.main import main
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.chdir(tmp_path)
+    _clear_claude_mode_env(monkeypatch)
+    captured = _patch_wrap_claude_scaffolding(monkeypatch, wrap_mod)
+    monkeypatch.setattr(code_agent, "plugin_installed", lambda *_a, **_k: True)
+
+    result = runner.invoke(
+        main, ["wrap", "claude", "--no-mcp", "--no-tokensave", "--no-serena"], env={}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["plugin_runner_calls"] == []
 
 
 def test_wrap_claude_respects_explicit_agent_flag(

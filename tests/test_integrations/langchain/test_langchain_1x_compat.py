@@ -100,6 +100,34 @@ class TestBindToolsSurvivesWrapping:
         assert model is inner
         assert kwargs == {}
 
+    def test_unwrap_binding_returns_the_model_untouched_when_langchain_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from headroom.integrations import HeadroomChatModel
+        from headroom.integrations.langchain import chat_model
+
+        # The missing-langchain fallback: RunnableBinding is a stub `()`
+        # (never a real type), so `isinstance(model, RunnableBinding)` would
+        # raise if this branch were not guarded.
+        monkeypatch.setattr(chat_model, "RunnableBinding", ())
+        inner = GenericFakeChatModel(messages=iter([AIMessage("ok")]))
+
+        model, kwargs = HeadroomChatModel._unwrap_binding(inner)
+
+        assert model is inner
+        assert kwargs == {}
+
+    def test_unwrap_binding_unwraps_a_real_binding(self) -> None:
+        from headroom.integrations import HeadroomChatModel
+
+        inner = GenericFakeChatModel(messages=iter([AIMessage("ok")]))
+        bound = inner.bind(tools=[query_database], tool_choice="query_database")
+
+        model, kwargs = HeadroomChatModel._unwrap_binding(bound)
+
+        assert model is inner
+        assert kwargs == {"tools": [query_database], "tool_choice": "query_database"}
+
 
 class TestWrappedToolIsUsable:
     """Defects 2 and 3: the wrapped tool must invoke, and keep its schema."""

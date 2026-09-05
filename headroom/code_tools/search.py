@@ -23,7 +23,6 @@ Grep, or Glob. Five actions live on this one entry point:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -33,53 +32,20 @@ from pathlib import Path
 from typing import Any
 
 from headroom._subprocess import run as _run_subprocess
-from headroom.proxy.helpers import safe_decode_for_logging
+from headroom.code_tools.files import (
+    PathOutsideRootError,
+    file_stamp,
+    resolve_path,
+)
+from headroom.code_tools.files import line_count as _line_count
+from headroom.code_tools.files import read_file_text as _read_file_text
 from headroom.transforms.code_compressor import (
-    _LANG_CONFIGS,
     CodeLanguage,
     LangConfig,
-    _get_parser,
     detect_language,
+    lang_config,
+    parser_for,
 )
-
-_STAMP_LENGTH = 12
-
-
-def file_stamp(content: str) -> str:
-    """Return the stamp for a file's content: the first 12 hex characters of
-    the sha256 hash of its bytes. Two reads of the same bytes get the same
-    stamp; any change to the bytes changes it. Shared with ``edit.py`` so a
-    write reports the same stamp a read of the result would."""
-
-    return hashlib.sha256(content.encode()).hexdigest()[:_STAMP_LENGTH]
-
-
-class PathOutsideRootError(ValueError):
-    """Raised when a request path resolves to somewhere outside the root."""
-
-
-def resolve_path(raw_path: str, root: Path) -> Path:
-    """Resolve a request path against ``root``.
-
-    A relative path resolves against ``root``. An absolute path is allowed,
-    but it must still land inside ``root``'s tree — anything else is
-    refused, so Search can't be used to read files outside the project.
-    A path under ``.git`` is refused too, whether it was written as
-    relative, absolute, or through a symlink — Search and Edit share this
-    check so neither can read or write the repo's own git data.
-    """
-
-    candidate = Path(raw_path).expanduser()
-    target = candidate if candidate.is_absolute() else root / candidate
-    resolved = target.resolve()
-    root_resolved = root.resolve()
-    try:
-        rel = resolved.relative_to(root_resolved)
-    except ValueError:
-        raise PathOutsideRootError(f"path outside root: {raw_path}") from None
-    if rel.parts[:1] == (".git",):
-        raise PathOutsideRootError(f"refused: path under .git: {raw_path}")
-    return resolved
 
 
 def is_unchanged_marker(text: str) -> bool:
@@ -105,14 +71,6 @@ def unchanged_marker_tokens(text: str) -> int | None:
 
 def _numbered_lines(content: str) -> str:
     return "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(content.split("\n"), 1))
-
-
-def _line_count(content: str) -> int:
-    return content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-
-
-def _read_file_text(path: Path) -> str:
-    return safe_decode_for_logging(path.read_bytes())
 
 
 def _read_range(content: str, rel: str, start: Any, end: Any, stamp: str) -> str:
@@ -317,12 +275,6 @@ def _handle_find(request: dict[str, Any], root: Path) -> str:
     return _cap_lines(matched, limit, "no files found")
 
 
-_ACTIONS: dict[str, Callable[[dict[str, Any], Path], str]] = {
-    "read": _handle_read,
-    "find": _handle_find,
-}
-
-
 # =============================================================================
 # grep: regex search over file contents, grouped by file
 # =============================================================================
@@ -490,9 +442,6 @@ def _handle_grep(request: dict[str, Any], root: Path) -> str:
     if error is not None:
         return error
     return _render_grep_matches(matches, limit)
-
-
-_ACTIONS["grep"] = _handle_grep
 
 
 # =============================================================================
@@ -678,7 +627,7 @@ def _handle_symbols(request: dict[str, Any], root: Path) -> str:
             "(no tree-sitter grammar for this file type, used a regex outline)"
         )
 
-    config = _LANG_CONFIGS.get(language)
+    config = lang_config(language)
     if config is None:
         return (
             f"{_render_regex_outline(rel, content)}\n"
@@ -686,7 +635,7 @@ def _handle_symbols(request: dict[str, Any], root: Path) -> str:
         )
 
     try:
-        parser = _get_parser(language.value)
+        parser = parser_for(language.value)
     except (ImportError, ValueError):
         return f"{_render_regex_outline(rel, content)}\n(tree-sitter unavailable, used a regex outline)"
 
@@ -694,9 +643,6 @@ def _handle_symbols(request: dict[str, Any], root: Path) -> str:
     found: list[_Symbol] = []
     _walk_symbols(tree.root_node, config, 0, found)
     return _render_symbols(rel, found)
-
-
-_ACTIONS["symbols"] = _handle_symbols
 
 
 # =============================================================================
@@ -755,7 +701,13 @@ def _handle_importers(request: dict[str, Any], root: Path) -> str:
     return _render_grep_matches(matches, _DEFAULT_GREP_LIMIT)
 
 
-_ACTIONS["importers"] = _handle_importers
+_ACTIONS: dict[str, Callable[[dict[str, Any], Path], str]] = {
+    "read": _handle_read,
+    "find": _handle_find,
+    "grep": _handle_grep,
+    "symbols": _handle_symbols,
+    "importers": _handle_importers,
+}
 
 
 def search(request: dict[str, Any], root: Path) -> str:

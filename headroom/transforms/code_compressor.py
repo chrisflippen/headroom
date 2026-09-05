@@ -592,6 +592,28 @@ _LANG_CONFIGS: dict[CodeLanguage, LangConfig] = {
 }
 
 
+def lang_config(language: CodeLanguage) -> LangConfig | None:
+    """Return the ``LangConfig`` for ``language``, or ``None`` if this
+    module has no tree-sitter configuration for it (e.g. ``UNKNOWN``).
+
+    The public accessor other modules should use instead of reaching into
+    the private ``_LANG_CONFIGS`` table directly.
+    """
+
+    return _LANG_CONFIGS.get(language)
+
+
+def parser_for(language: str) -> Any:
+    """Return a tree-sitter parser for ``language`` (e.g. ``"python"``).
+
+    The public accessor other modules should use instead of reaching into
+    the private ``_get_parser`` directly. See ``_get_parser`` for the
+    thread-local parser contract this returns.
+    """
+
+    return _get_parser(language)
+
+
 @dataclass
 class CodeStructure:
     """Extracted structure from parsed code."""

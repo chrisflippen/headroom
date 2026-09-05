@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from headroom.code_tools.edit import edit
-from headroom.code_tools.search import file_stamp
+from headroom.code_tools.files import file_stamp
 from tests._mcp_stub import import_module_with_mcp_stub
 
 mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")

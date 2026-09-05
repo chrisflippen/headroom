@@ -1592,6 +1592,30 @@ class TestRealASTRuns:
         assert func.start_point[0] == 0
         assert b"def foo" in func.text
 
+    def test_parser_for_is_the_public_accessor_for_get_parser(self):
+        """``parser_for`` is the public accessor other modules should use
+        instead of reaching into the private ``_get_parser``; it returns the
+        exact same kind of parser."""
+        from headroom.transforms.code_compressor import parser_for
+
+        parser = parser_for("python")
+        tree = parser.parse(b"def foo(x):\n    return x + 1\n")
+        assert tree.root_node.type == "module"
+
+    def test_lang_config_returns_the_python_lang_config(self):
+        from headroom.transforms.code_compressor import CodeLanguage, lang_config
+
+        config = lang_config(CodeLanguage.PYTHON)
+
+        assert config is not None
+        assert config.comment_prefix == "#"
+        assert "function_definition" in config.function_nodes
+
+    def test_lang_config_returns_none_for_a_language_with_no_config(self):
+        from headroom.transforms.code_compressor import CodeLanguage, lang_config
+
+        assert lang_config(CodeLanguage.UNKNOWN) is None
+
     def test_check_tree_sitter_available_verifies_real_parse(self):
         """``_check_tree_sitter_available`` must only return True when an actual
         parse succeeds — not merely when the package imports."""

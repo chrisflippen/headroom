@@ -318,6 +318,46 @@ def test_hook_main_resolves_builtin_edit_file_path(tmp_path: Path) -> None:
     assert message == ""
 
 
+def test_hook_main_resolves_headroom_edit_rename_to_the_new_path(tmp_path: Path) -> None:
+    _write(tmp_path / "pyproject.toml", "[tool.pyrefly]\n")
+    (tmp_path / ".venv").mkdir()
+    new_path = _write(tmp_path / "new_name.py", "x = 1\n")
+    payload = json.dumps(
+        {
+            "tool_input": {"action": "rename", "path": "old_name.py", "to": "new_name.py"},
+            "cwd": str(tmp_path),
+        }
+    )
+    runner = _RecordingRunner()
+
+    code, message = pec.hook_main(payload, runner)
+
+    assert code == 0
+    assert message == ""
+    assert len(runner.calls) == 1
+    check, _timeout = runner.calls[0]
+    assert check.argv[-1] == str(new_path)
+
+
+def test_hook_main_exits_zero_immediately_for_a_delete(tmp_path: Path) -> None:
+    _write(tmp_path / "pyproject.toml", "[tool.pyrefly]\n")
+    (tmp_path / ".venv").mkdir()
+    payload = json.dumps(
+        {
+            "tool_input": {"action": "delete", "path": "mod.py"},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    def must_not_be_called(check: pec.Check, timeout: int) -> Any:
+        raise AssertionError("runner must not be called for a delete")
+
+    code, message = pec.hook_main(payload, must_not_be_called)
+
+    assert code == 0
+    assert message == ""
+
+
 def test_hook_main_exits_zero_immediately_for_a_markdown_file(tmp_path: Path) -> None:
     payload = json.dumps(
         {

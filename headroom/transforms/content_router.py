@@ -4285,7 +4285,7 @@ class ContentRouter(Transform):
                 # Pre-load tree-sitter parsers for common languages
                 # Each parser is ~50ms to load; doing it here avoids 500ms+ on first code hit
                 try:
-                    from .code_compressor import _check_tree_sitter_available, _get_parser
+                    from .code_compressor import _check_tree_sitter_available, parser_for
 
                     if _check_tree_sitter_available():
                         common_languages = [
@@ -4301,7 +4301,7 @@ class ContentRouter(Transform):
                         loaded = []
                         for lang in common_languages:
                             try:
-                                _get_parser(lang)
+                                parser_for(lang)
                                 loaded.append(lang)
                             except (ValueError, ImportError):
                                 pass  # Language not available, skip

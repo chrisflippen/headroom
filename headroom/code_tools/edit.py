@@ -16,17 +16,17 @@ from pathlib import Path
 from typing import Any
 
 from headroom import fsutil
-from headroom.code_tools.search import (
+from headroom.code_tools.files import (
     PathOutsideRootError,
-    _line_count,
-    _read_file_text,
     file_stamp,
     resolve_path,
 )
+from headroom.code_tools.files import line_count as _line_count
+from headroom.code_tools.files import read_file_text as _read_file_text
 
 
 def _resolve(raw_path: str, root: Path) -> Path | str:
-    """Resolve ``raw_path`` against ``root`` through Search's ``resolve_path``,
+    """Resolve ``raw_path`` against ``root`` through ``files.resolve_path``,
     which refuses anything outside the root or under ``.git``. Returns the
     resolved path, or a plain error string a handler can return straight to
     its caller."""

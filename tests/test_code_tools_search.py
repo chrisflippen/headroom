@@ -467,7 +467,7 @@ def test_symbols_falls_back_to_regex_without_tree_sitter(
     def _boom(language: str) -> None:
         raise ImportError("no tree-sitter")
 
-    monkeypatch.setattr("headroom.code_tools.search._get_parser", _boom)
+    monkeypatch.setattr("headroom.code_tools.search.parser_for", _boom)
 
     result = search({"action": "symbols", "path": "a.py"}, root=tmp_path)
 

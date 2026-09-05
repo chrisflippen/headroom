@@ -404,7 +404,10 @@ def _edited_path(payload: dict[str, Any]) -> Path | None:
 
     The built-in Edit/Write/MultiEdit tools put an absolute path in
     `tool_input.file_path`. Headroom's own `mcp__headroom__Edit` puts a
-    path in `tool_input.path` that is relative to the payload's `cwd`.
+    path in `tool_input.path` that is relative to the payload's `cwd` --
+    except for a `rename`, where the file to check is the new path in
+    `tool_input.to`, since `path` no longer exists after the rename, and a
+    `delete`, where there is no file left to check at all.
     """
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -414,7 +417,11 @@ def _edited_path(payload: dict[str, Any]) -> Path | None:
     if isinstance(file_path, str) and file_path:
         return Path(file_path)
 
-    raw_path = tool_input.get("path")
+    action = tool_input.get("action")
+    if action == "delete":
+        return None
+
+    raw_path = tool_input.get("to") if action == "rename" else tool_input.get("path")
     if isinstance(raw_path, str) and raw_path:
         candidate = Path(raw_path)
         if candidate.is_absolute():

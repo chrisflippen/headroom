@@ -33,3 +33,16 @@ you set yourself is left alone.
 
 Run `headroom code-agent remove`. That removes the managed setting and switches the
 session back to Claude Code's own default agent and tools.
+
+## Database connections
+
+The `Sql` tool never takes a raw connection URL from the agent — only a connection
+reference: a short name that points at a URL held in the system keychain, never the
+URL itself. Manage connection references with:
+
+- `headroom code-agent db add <name> <url>` — stores the URL in the keychain and
+  records the name and database kind (`postgres` or `sqlite`); prints the name and
+  kind only, never the URL.
+- `headroom code-agent db remove <name>` — drops the connection reference and its
+  keychain secret.
+- `headroom code-agent db list` — lists the configured connection reference names.

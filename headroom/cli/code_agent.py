@@ -24,7 +24,8 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,14 @@ import click
 from headroom import fsutil
 from headroom._subprocess import run
 from headroom.code_tools import brief, skills_ensure
+from headroom.code_tools.connections import (
+    Keychain,
+    MacOSKeychain,
+    add_connection,
+    kind_from_url,
+    list_connections,
+    remove_connection,
+)
 from headroom.code_tools.post_edit_check import hook_main, real_runner
 from headroom.providers.claude.vscode import claude_user_settings_path
 
@@ -194,6 +203,49 @@ def agent_launch_args(agent: str) -> list[str]:
     return ["--agent", agent]
 
 
+@dataclass(frozen=True)
+class LaunchPlan:
+    """What `wrap claude` should do about the code agent for one launch.
+
+    `args` is the full `claude` argv to run (the caller's own args, with the
+    `--agent` flag prepended unless the caller already passed one). `warning`
+    is a message to print when a project's own settings override the agent
+    switch, or None when there is nothing to say.
+    """
+
+    args: tuple[str, ...]
+    warning: str | None
+
+
+def launch_plan(claude_args: Sequence[str], cwd: Path, settings_path: Path) -> LaunchPlan:
+    """Decide the `--agent` launch args and warning for one `wrap claude` run.
+
+    Call this after `ensure_agent_switch(settings_path)` has already run, so
+    `settings_path` reflects the switch's current state. If the user already
+    had their own `agent` value in the user settings file (the "user-set"
+    state `ensure_agent_switch` leaves alone), the launch uses that agent
+    rather than silently overriding it with headroom's own default. A
+    project's own `.claude/settings.json` or `settings.local.json` `agent`
+    key is never rewritten — Claude Code's own settings precedence, not this
+    decision, is what makes the project's value win at runtime, so this only
+    warns about the conflict, never changes the args because of it.
+    """
+    warning = None
+    project_agent = project_agent_override(cwd)
+    if project_agent is not None and project_agent != DEFAULT_AGENT:
+        warning = (
+            f"Project sets agent={project_agent} (this overrides the Headroom code agent switch)."
+        )
+
+    args = tuple(claude_args)
+    if "--agent" not in args:
+        state = agent_switch_state(settings_path)
+        agent = state.split(":", 1)[1] if state.startswith("user-set:") else DEFAULT_AGENT
+        args = (*agent_launch_args(agent), *args)
+
+    return LaunchPlan(args=args, warning=warning)
+
+
 # ---------------------------------------------------------------------------
 # 5. Plugin install / uninstall — argv only, dispatched through `runner`.
 # ---------------------------------------------------------------------------
@@ -242,6 +294,60 @@ def install_plugin(runner: Runner, source: str) -> None:
             "user",
         ]
     )
+
+
+def installed_plugins_path(settings_path: Path) -> Path:
+    """Where Claude Code records installed plugins, next to `settings_path`.
+
+    Claude Code keeps `plugins/installed_plugins.json` as a sibling of
+    `settings.json` under the same config directory, so this only needs
+    the settings path the caller already has -- no separate env lookup.
+    """
+
+    return settings_path.parent / "plugins" / "installed_plugins.json"
+
+
+def plugin_installed(
+    installed_plugins_path: Path,
+    plugin_key: str = f"{_PLUGIN_NAME}@{_MARKETPLACE_NAME}",
+) -> bool:
+    """True when Claude Code's own registry lists `plugin_key` as installed.
+
+    A missing file, unreadable JSON, or a present key with an empty list
+    (uninstalled but not yet pruned from the file) all count as not
+    installed.
+    """
+
+    if not installed_plugins_path.exists():
+        return False
+    try:
+        payload = json.loads(installed_plugins_path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    plugins = payload.get("plugins")
+    if not isinstance(plugins, dict):
+        return False
+    entry = plugins.get(plugin_key)
+    return isinstance(entry, list) and len(entry) > 0
+
+
+def ensure_plugin_installed(
+    runner: Runner, source: str, installed_probe: Callable[[], bool]
+) -> None:
+    """Install the code agent plugin, unless `installed_probe` says it already is.
+
+    `wrap claude` calls this on every launch (never a one-time `on`
+    command), so it must stay cheap when the plugin is already there --
+    that's what `installed_probe` is for: a caller passes in whichever
+    check is worth paying for, and this function only calls `install_plugin`
+    when that check says the plugin is missing.
+    """
+
+    if installed_probe():
+        return
+    install_plugin(runner, source)
 
 
 def remove_plugin(runner: Runner) -> None:
@@ -360,6 +466,60 @@ def code_agent_status() -> None:
     override = project_agent_override(Path.cwd())
     if override is not None:
         click.echo(f"  Project override: agent={override}")
+
+
+# ---------------------------------------------------------------------------
+# 9. Click commands: `headroom code-agent db add / remove / list`.
+# ---------------------------------------------------------------------------
+
+
+def _default_keychain() -> Keychain:
+    return MacOSKeychain()
+
+
+@code_agent_group.group("db")
+def code_agent_db_group() -> None:
+    """Manage the Sql tool's connection references: a name, never a URL."""
+
+
+@code_agent_db_group.command("add")
+@click.argument("name")
+@click.argument("url")
+def code_agent_db_add(name: str, url: str) -> None:
+    """Add or replace connection reference NAME, pointing at URL.
+
+    The URL goes straight to the keychain; only the name and database kind
+    are ever printed or written to the connections config file.
+    """
+    try:
+        kind = kind_from_url(url)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    verb = "Updated" if name in list_connections() else "Added"
+    add_connection(name, url, _default_keychain())
+    click.echo(f"  {verb} connection {name!r} ({kind}).")
+
+
+@code_agent_db_group.command("remove")
+@click.argument("name")
+def code_agent_db_remove(name: str) -> None:
+    """Remove connection reference NAME."""
+    if name not in list_connections():
+        click.echo(f"  No connection reference named {name!r}.")
+        return
+    remove_connection(name, _default_keychain())
+    click.echo(f"  Removed connection {name!r}.")
+
+
+@code_agent_db_group.command("list")
+def code_agent_db_list() -> None:
+    """List configured connection reference names."""
+    names = list_connections()
+    if not names:
+        click.echo("  No connections are configured.")
+        return
+    for name in names:
+        click.echo(f"  {name}")
 
 
 def _skills_ensure_runner(argv: list[str]) -> None:

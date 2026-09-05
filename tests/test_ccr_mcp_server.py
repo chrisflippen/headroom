@@ -518,18 +518,23 @@ def test_edit_and_sql_tools_are_registered() -> None:
 
 @pytest.fixture
 def _sql_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Isolate the connections config file and stand in one persistent
-    MemoryKeychain for the real macOS keychain, so a Sql wiring test never
-    touches the filesystem's real config dir or the actual keychain."""
+    """Isolate the connections config file, so a Sql wiring test never
+    touches the filesystem's real config dir."""
 
     monkeypatch.setenv(paths.HEADROOM_CONFIG_DIR_ENV, str(tmp_path))
-    keychain = connections.MemoryKeychain()
-    monkeypatch.setattr(connections, "MacOSKeychain", lambda: keychain)
     return tmp_path
 
 
+@pytest.fixture
+def sql_keychain() -> connections.MemoryKeychain:
+    """A MemoryKeychain injected into HeadroomMCPServer in place of the real
+    macOS keychain, so a Sql wiring test never touches it."""
+
+    return connections.MemoryKeychain()
+
+
 def test_handle_sql_runs_a_query_against_a_known_connection(
-    _sql_config_dir: Path, tmp_path: Path
+    _sql_config_dir: Path, sql_keychain: connections.MemoryKeychain, tmp_path: Path
 ) -> None:
     db_path = tmp_path / "app.sqlite"
     import sqlite3
@@ -540,22 +545,56 @@ def test_handle_sql_runs_a_query_against_a_known_connection(
     conn.commit()
     conn.close()
 
-    keychain = connections.MacOSKeychain()
-    connections.add_connection("mydb", f"sqlite://{db_path}", keychain)
+    connections.add_connection("mydb", f"sqlite://{db_path}", sql_keychain)
 
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False, keychain=sql_keychain)
     response = asyncio.run(server._handle_sql({"connection": "mydb", "sql": "SELECT * FROM users"}))
 
     assert "Alice" in response[0].kwargs["text"]
 
 
-def test_handle_sql_unknown_connection_lists_known_names(_sql_config_dir: Path) -> None:
-    keychain = connections.MacOSKeychain()
-    connections.add_connection("mydb", "sqlite:///anything.sqlite", keychain)
+def test_handle_sql_unknown_connection_lists_known_names(
+    _sql_config_dir: Path, sql_keychain: connections.MemoryKeychain
+) -> None:
+    connections.add_connection("mydb", "sqlite:///anything.sqlite", sql_keychain)
 
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False, keychain=sql_keychain)
     response = asyncio.run(server._handle_sql({"connection": "nope", "sql": "SELECT 1"}))
 
     text = response[0].kwargs["text"]
     assert "nope" in text
     assert "mydb" in text
+
+
+def test_call_tool_sql_query_reaches_the_resolver_and_reports_unknown_names(
+    _sql_config_dir: Path, sql_keychain: connections.MemoryKeychain, tmp_path: Path
+) -> None:
+    """``call_tool`` (the MCP dispatch entry point, not just the private
+    ``_handle_sql`` helper) reaches ``sql.query`` for a known connection and
+    shares the same known-connections message for an unknown one."""
+
+    db_path = tmp_path / "app.sqlite"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+    conn.execute("INSERT INTO users VALUES (1, 'Alice')")
+    conn.commit()
+    conn.close()
+
+    connections.add_connection("mydb", f"sqlite://{db_path}", sql_keychain)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False, keychain=sql_keychain)
+
+    known_response = asyncio.run(
+        server._call_tool_handler(
+            "Sql", {"connection": "mydb", "sql": "SELECT * FROM users", "action": "query"}
+        )
+    )
+    assert "Alice" in known_response[0].kwargs["text"]
+
+    unknown_response = asyncio.run(
+        server._call_tool_handler("Sql", {"connection": "nope", "sql": "SELECT 1"})
+    )
+    unknown_text = unknown_response[0].kwargs["text"]
+    assert connections.describe_unknown("nope") in unknown_text

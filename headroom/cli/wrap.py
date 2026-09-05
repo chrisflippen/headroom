@@ -5457,18 +5457,19 @@ def claude(
         # Edit, Write, Grep, or Glob) the default for this session, unless
         # the caller opted out or already passed their own --agent.
         if not no_code_agent:
-            _code_agent.ensure_agent_switch(claude_user_settings_path())
-            _project_agent = _code_agent.project_agent_override(Path.cwd())
-            if _project_agent is not None and _project_agent != _code_agent.DEFAULT_AGENT:
-                click.echo(
-                    f"  Project sets agent={_project_agent} "
-                    "(this overrides the Headroom code agent switch)."
-                )
-            if "--agent" not in claude_args:
-                claude_args = (
-                    *_code_agent.agent_launch_args(_code_agent.DEFAULT_AGENT),
-                    *claude_args,
-                )
+            _user_settings_path = claude_user_settings_path()
+            _code_agent.ensure_agent_switch(_user_settings_path)
+            _code_agent.ensure_plugin_installed(
+                _code_agent._claude_runner,
+                _code_agent.marketplace_source(),
+                lambda: _code_agent.plugin_installed(
+                    _code_agent.installed_plugins_path(_user_settings_path)
+                ),
+            )
+            _plan = _code_agent.launch_plan(claude_args, Path.cwd(), _user_settings_path)
+            if _plan.warning is not None:
+                click.echo(f"  {_plan.warning}")
+            claude_args = _plan.args
 
         result = subprocess.run([claude_bin, *claude_args], env=env)
         raise SystemExit(result.returncode)

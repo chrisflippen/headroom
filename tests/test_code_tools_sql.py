@@ -223,16 +223,12 @@ class _FakePostgresConnection:
         self.closed = True
 
 
-def test_postgres_query_issues_begin_read_only_before_the_query(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_postgres_query_issues_begin_read_only_before_the_query() -> None:
     executed: list[str] = []
 
     def fake_connect(url: str) -> _FakePostgresConnection:
         assert url == "postgresql://alice:secret@localhost:5432/app"
         return _FakePostgresConnection(executed)
-
-    monkeypatch.setattr(sql, "postgres_connect", fake_connect)
 
     def resolver(name: str) -> str:
         return "postgresql://alice:secret@localhost:5432/app"
@@ -240,6 +236,7 @@ def test_postgres_query_issues_begin_read_only_before_the_query(
     result = sql.query(
         {"connection": "mydb", "sql": "SELECT id, name FROM people"},
         resolver,
+        postgres_connect=fake_connect,
     )
 
     assert executed == ["BEGIN READ ONLY", "SELECT id, name FROM people"]

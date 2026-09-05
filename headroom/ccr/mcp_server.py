@@ -38,12 +38,15 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from headroom import paths as _paths
 from headroom import savings_ledger
 from headroom.cache.compression_store import format_retrieval_miss_detail
 from headroom.telemetry import session as telemetry_session
+
+if TYPE_CHECKING:
+    from headroom.code_tools.connections import Keychain
 
 # fcntl is Unix-only; on Windows we skip file locking (stats are best-effort).
 # Keep the module typed as Any so Windows mypy runs don't try to resolve Unix-only attrs.
@@ -370,6 +373,7 @@ class HeadroomMCPServer:
         self,
         proxy_url: str = DEFAULT_PROXY_URL,
         check_proxy: bool = True,
+        keychain: Keychain | None = None,
     ):
         self.proxy_url = proxy_url
         self.check_proxy = check_proxy
@@ -377,6 +381,13 @@ class HeadroomMCPServer:
         self._stats = SessionStats()
         self._local_store: Any = None  # Lazy-initialized CompressionStore
         self._compressor_initialized = False
+
+        if keychain is not None:
+            self._keychain: Keychain = keychain
+        else:
+            from headroom.code_tools.connections import MacOSKeychain
+
+            self._keychain = MacOSKeychain()
 
         if not MCP_AVAILABLE or Server is None:
             raise ImportError("MCP SDK not installed. Install with: pip install mcp")
@@ -805,7 +816,7 @@ class HeadroomMCPServer:
                     "single SELECT (or WITH/EXPLAIN/SHOW/PRAGMA) statement; writes and "
                     "multiple statements are refused. 'limit' caps how many rows come back. "
                     "If the connection name is not recognized, the error lists the names that "
-                    "are."
+                    "are; add one with `headroom code-agent db add <name> <url>`."
                 ),
                 inputSchema={
                     "type": "object",
@@ -897,6 +908,11 @@ class HeadroomMCPServer:
                         text=json.dumps({"error": str(e)}),
                     )
                 ]
+
+        # Stored on self so tests can call the MCP dispatch entry point
+        # directly, the same way they call the handler methods above --
+        # the MCP SDK's own decorator gives back nothing else to hold onto.
+        self._call_tool_handler = call_tool
 
     async def _handle_compress(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle headroom_compress tool call."""
@@ -1125,8 +1141,9 @@ class HeadroomMCPServer:
         "schema", but code_tools.sql only understands ``action`` missing
         (meaning "query") or set to "schema", so "query" is dropped before
         the call. An unknown connection name comes back from the resolver
-        as a KeyError; this method turns that into a plain error line that
-        also lists every connection name that is known.
+        as a KeyError; this method turns that into a plain refusal line
+        built from ``connections.describe_unknown``, shared with the
+        ``db`` CLI commands so both report unknown names the same way.
         """
         from headroom.code_tools import connections
         from headroom.code_tools import sql as code_tools_sql
@@ -1135,20 +1152,14 @@ class HeadroomMCPServer:
         if request.get("action") == "query":
             del request["action"]
 
-        keychain = connections.MacOSKeychain()
-
         def resolver(name: str) -> str:
-            return connections.resolve_connection(name, keychain)
+            return connections.resolve_connection(name, self._keychain)
 
         try:
             text = code_tools_sql.query(request, resolver)
-        except KeyError as exc:
-            message = str(exc.args[0]) if exc.args else str(exc)
-            known = connections.list_connections()
-            if known:
-                text = f"Refused: {message}. Known connections: {', '.join(known)}."
-            else:
-                text = f"Refused: {message}. No connections are configured."
+        except KeyError:
+            name = str(request.get("connection", ""))
+            text = f"Refused: {connections.describe_unknown(name)}"
 
         return [TextContent(type="text", text=text)]
 

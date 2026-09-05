@@ -41,6 +41,29 @@ def test_add_resolve_remove_round_trip_and_no_url_on_disk(config_dir: Path) -> N
         connections.resolve_connection("mydb", store)
 
 
+def test_describe_unknown_lists_known_connections_and_the_add_command(
+    config_dir: Path,
+) -> None:
+    store = connections.MemoryKeychain()
+    connections.add_connection("mydb", "postgresql://alice:secret@localhost:5432/app", store)
+
+    message = connections.describe_unknown("nope")
+
+    assert message == (
+        "no connection reference named 'nope'. Known connections: mydb. "
+        "Add one with `headroom code-agent db add`."
+    )
+
+
+def test_describe_unknown_with_no_connections_configured(config_dir: Path) -> None:
+    message = connections.describe_unknown("nope")
+
+    assert message == (
+        "no connection reference named 'nope'. No connections are configured. "
+        "Add one with `headroom code-agent db add`."
+    )
+
+
 def test_macos_keychain_builds_expected_argv_without_touching_real_keychain() -> None:
     calls: list[list[str]] = []
 

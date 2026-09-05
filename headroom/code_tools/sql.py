@@ -25,12 +25,48 @@ _MAX_LIMIT = 1000
 _READ_ONLY_PATTERN = re.compile(r"^\s*(SELECT|WITH|EXPLAIN|SHOW|PRAGMA)\b", re.IGNORECASE)
 
 
-def query(request: dict[str, Any], resolver: Callable[[str], str]) -> str:
+# No Postgres driver (psycopg, psycopg2, asyncpg) is installed in this
+# project's venv, and the brief for this slice says not to add one. So the
+# connect function is a module-level hook: at runtime it lazily imports
+# whichever driver is available, and tests replace it with a fake to prove
+# the read-only transaction wrapping without a real Postgres server.
+
+
+def _default_postgres_connect(url: str) -> Any:
+    try:
+        import psycopg  # type: ignore[import-not-found]
+
+        return psycopg.connect(url)
+    except ModuleNotFoundError:
+        pass
+    try:
+        import psycopg2  # type: ignore[import-not-found]
+
+        return psycopg2.connect(url)
+    except ModuleNotFoundError:
+        pass
+    raise ModuleNotFoundError(
+        "no Postgres driver is installed (tried psycopg, psycopg2); "
+        "install one to query Postgres connections"
+    )
+
+
+def query(
+    request: dict[str, Any],
+    resolver: Callable[[str], str],
+    *,
+    postgres_connect: Callable[[str], Any] = _default_postgres_connect,
+) -> str:
     """Run a read-only query (or fetch schema) for a named connection.
 
     ``request`` is either ``{"connection": name, "sql": "...", "limit": n}``
     or ``{"connection": name, "action": "schema"}``. Returns a plain-text
     result: a compact table, a schema listing, or a one-line refusal.
+
+    ``postgres_connect`` opens a Postgres connection lazily -- it is only
+    ever called for a ``postgresql://`` connection reference -- and defaults
+    to importing whichever driver is installed. Tests pass a fake instead of
+    monkeypatching a module global.
     """
 
     connection_name = request.get("connection")
@@ -41,7 +77,7 @@ def query(request: dict[str, Any], resolver: Callable[[str], str]) -> str:
     if action is not None:
         if action != "schema":
             return f'Refused: unknown action {action!r}. Only "schema" is supported.'
-        return _run_schema(connection_name, resolver)
+        return _run_schema(connection_name, resolver, postgres_connect=postgres_connect)
 
     raw_sql = request.get("sql")
     if not raw_sql or not isinstance(raw_sql, str):
@@ -53,7 +89,7 @@ def query(request: dict[str, Any], resolver: Callable[[str], str]) -> str:
 
     limit = _clamp_limit(request.get("limit"))
     url = resolver(connection_name)
-    connection = _open(url)
+    connection = _open(url, postgres_connect=postgres_connect)
     try:
         result = _select(connection, raw_sql, limit)
     finally:
@@ -186,36 +222,7 @@ def open_sqlite_readonly(path: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
-# No Postgres driver (psycopg, psycopg2, asyncpg) is installed in this
-# project's venv, and the brief for this slice says not to add one. So the
-# connect function is a module-level hook: at runtime it lazily imports
-# whichever driver is available, and tests replace it with a fake to prove
-# the read-only transaction wrapping without a real Postgres server.
-
-
-def _default_postgres_connect(url: str) -> Any:
-    try:
-        import psycopg  # type: ignore[import-not-found]
-
-        return psycopg.connect(url)
-    except ModuleNotFoundError:
-        pass
-    try:
-        import psycopg2  # type: ignore[import-not-found]
-
-        return psycopg2.connect(url)
-    except ModuleNotFoundError:
-        pass
-    raise ModuleNotFoundError(
-        "no Postgres driver is installed (tried psycopg, psycopg2); "
-        "install one to query Postgres connections"
-    )
-
-
-postgres_connect: Callable[[str], Any] = _default_postgres_connect
-
-
-def _open(url: str) -> Any:
+def _open(url: str, *, postgres_connect: Callable[[str], Any]) -> Any:
     """Open ``url`` ready for read-only statements: sqlite in ``mode=ro``,
     Postgres with a ``BEGIN READ ONLY`` transaction already started."""
 
@@ -284,9 +291,14 @@ def _postgres_schema_tables(connection: Any) -> list[tuple[str, list[tuple[str, 
     return tables
 
 
-def _run_schema(connection_name: str, resolver: Callable[[str], str]) -> str:
+def _run_schema(
+    connection_name: str,
+    resolver: Callable[[str], str],
+    *,
+    postgres_connect: Callable[[str], Any],
+) -> str:
     url = resolver(connection_name)
-    connection = _open(url)
+    connection = _open(url, postgres_connect=postgres_connect)
     try:
         tables = _schema(connection)
     finally:
@@ -343,4 +355,4 @@ def _cell_to_str(value: Any) -> str:
     return str(value)
 
 
-__all__ = ["query", "open_sqlite_readonly", "postgres_connect"]
+__all__ = ["query", "open_sqlite_readonly"]

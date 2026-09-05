@@ -173,6 +173,25 @@ def list_connections() -> list[str]:
     return sorted(data["connections"].keys())
 
 
+def describe_unknown(name: str) -> str:
+    """Describe an unknown connection reference name for a caller to show.
+
+    Shared by the Sql tool's refusal message and the ``db`` CLI commands so
+    both report the same known-connections list, in the same words, and
+    point at the same fix.
+    """
+
+    known = list_connections()
+    if known:
+        listing = f"Known connections: {', '.join(known)}."
+    else:
+        listing = "No connections are configured."
+    return (
+        f"no connection reference named {name!r}. {listing} "
+        "Add one with `headroom code-agent db add`."
+    )
+
+
 __all__ = [
     "KEYCHAIN_SERVICE",
     "Keychain",
@@ -183,4 +202,5 @@ __all__ = [
     "resolve_connection",
     "remove_connection",
     "list_connections",
+    "describe_unknown",
 ]

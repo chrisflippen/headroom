@@ -1379,11 +1379,10 @@ class HeadroomProxy(
         if config.code_graph_watcher:
             from headroom.graph.watcher import CodeGraphWatcher
 
-            self.code_graph_watcher = CodeGraphWatcher(project_dir=Path.cwd())
-            if self.code_graph_watcher.start():
+            _code_graph_watcher = CodeGraphWatcher(project_dir=Path.cwd())
+            if _code_graph_watcher.start():
                 logger.info("Code graph: file watcher started")
-            else:
-                self.code_graph_watcher = None
+                self.code_graph_watcher = _code_graph_watcher
 
         self.pipeline_extensions.emit(
             PipelineStage.SETUP,
@@ -2314,13 +2313,21 @@ class HeadroomProxy(
                         url, **post_kwargs
                     )
 
-                    # Transient overloads (429 rate-limit, 529 overloaded):
-                    # retry honoring Retry-After, but return verbatim once
-                    # exhausted — a clean overload signal beats a synthesized 5xx
-                    # (extends #1221 to 529, Anthropic's overloaded_error).
+                    # Transient overloads (429 rate-limit, 529 overloaded): rate
+                    # limiting is Anthropic's job and the client's job, not the
+                    # proxy's, so by default (retry_overload_enabled=False) the
+                    # status is forwarded verbatim and immediately — no
+                    # proxy-side sleep. Claude Code already handles 429/529
+                    # itself (countdown, cancel), but only if it sees the
+                    # status promptly; a 60s x N-attempt proxy-side retry loop
+                    # left it frozen instead. Set retry_overload_enabled=True
+                    # (HEADROOM_RETRY_OVERLOAD) to restore the old behavior of
+                    # retrying with backoff, honoring Retry-After (extends
+                    # #1221 to 529, Anthropic's overloaded_error).
                     if response.status_code in RETRYABLE_OVERLOAD_STATUSES:
                         if (
                             not self.config.retry_enabled
+                            or not self.config.retry_overload_enabled
                             or attempt >= self.config.retry_max_attempts - 1
                         ):
                             return response
@@ -5666,7 +5673,7 @@ def run_server(
 ║    Optimization:    {"ENABLED " if config.optimize else "DISABLED"}                                       ║
 ║    Caching:         {"ENABLED " if config.cache_enabled else "DISABLED"}   (TTL: {config.cache_ttl_seconds}s)                          ║
 ║    Rate Limiting:   {"ENABLED " if config.rate_limit_enabled else "DISABLED"}   ({config.rate_limit_requests_per_minute} req/min, {config.rate_limit_tokens_per_minute:,} tok/min)       ║
-║    Retry:           {"ENABLED " if config.retry_enabled else "DISABLED"}   (max {config.retry_max_attempts} attempts)                       ║
+║    Retry:           {"ENABLED " if config.retry_enabled else "DISABLED"}   (max {config.retry_max_attempts} attempts, overload retry {"ON " if config.retry_overload_enabled else "OFF"})   ║
 ║    Cost Tracking:   {"ENABLED " if config.cost_tracking_enabled else "DISABLED"}   (budget: {"$" + str(config.budget_limit_usd) + "/" + config.budget_period if config.budget_limit_usd else "unlimited"})          ║
 ║    Code-Aware:      {code_aware_status:<52}║
 ║    HTTP/2:          {http2_status:<52}║

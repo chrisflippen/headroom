@@ -1340,13 +1340,22 @@ class StreamingMixin:
                             headers=dict(upstream_response.headers),
                             status_code=upstream_response.status_code,
                         )
-                    # Retry transient overloads (429 rate-limit, 529 overloaded)
+                    # Transient overloads (429 rate-limit, 529 overloaded): rate
+                    # limiting is Anthropic's job and the client's job, not the
+                    # proxy's, so by default (retry_overload_enabled=False) the
+                    # status is forwarded to the client verbatim and
+                    # immediately — no proxy-side sleep. Claude Code already
+                    # handles 429/529 itself (countdown, cancel), but only if
+                    # it sees the status promptly. Set
+                    # retry_overload_enabled=True (HEADROOM_RETRY_OVERLOAD) to
+                    # restore the old behavior of retrying with backoff,
                     # honoring Retry-After — the streaming sibling of the
-                    # _retry_request path (#1221); on exhaustion, fall through to
-                    # forward the status to the client.
+                    # _retry_request path (#1221); on exhaustion, fall through
+                    # to forward the status to the client.
                     if (
                         upstream_response.status_code in RETRYABLE_OVERLOAD_STATUSES
                         and self.config.retry_enabled
+                        and self.config.retry_overload_enabled
                         and attempt < retry_attempts - 1
                     ):
                         delay_with_jitter = retry_after_ms(

@@ -326,6 +326,13 @@ class ProxyConfig:
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 1000
     retry_max_delay_ms: int = 30000
+    # Rate limiting (429) and overload (529) are Anthropic's job and the
+    # client's job, not the proxy's: Claude Code already handles both with
+    # its own countdown/cancel UI, but only if it sees the status promptly.
+    # Default OFF so a 429/529 is forwarded to the client verbatim and
+    # immediately, with no proxy-side sleep. Set True to restore the old
+    # behavior of retrying with backoff, honoring Retry-After.
+    retry_overload_enabled: bool = False
 
     # Prefix freeze
     prefix_freeze_enabled: bool = True

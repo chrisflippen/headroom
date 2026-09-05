@@ -1,18 +1,29 @@
 """Upstream 429 rate-limit retry + Retry-After honoring (fixes #1221).
 
 Both the non-streaming (``server.py:_retry_request``) and streaming
-(``streaming.py:_stream_response``) forwarders must retry an upstream 429 with
+(``streaming.py:_stream_response``) forwarders retry an upstream 429 with
 backoff instead of passing it straight back to the client, since a parallel
 agent fan-out that exceeds the per-minute limit otherwise aborts every run.
+
+This is opt-in behavior, not the default (D1G-2249): rate limiting is
+Anthropic's job and the client's job, not the proxy's, so ``retry_overload_enabled``
+defaults to ``False`` and a 429/529 is forwarded verbatim and immediately with
+no proxy-side sleep — see ``tests/test_proxy/test_overload_passthrough.py`` for
+that default-off contract. Every proxy built here opts back in with
+``retry_overload_enabled=True`` to exercise the retry-with-backoff path this
+file is about.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from typing import cast
 
 import httpx
+import pytest
 
-from headroom.proxy.server import ProxyConfig, create_app
+from headroom.proxy.server import HeadroomProxy, ProxyConfig, create_app
 
 
 class _RateLimitTransport(httpx.AsyncBaseTransport):
@@ -37,7 +48,8 @@ class _RateLimitTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
-        async for _ in request.stream:  # drain the request body
+        stream = cast(AsyncIterator[bytes], request.stream)
+        async for _ in stream:  # drain the request body
             pass
         if self.calls <= self.fail_times:
             headers = {"retry-after": self.retry_after} if self.retry_after is not None else {}
@@ -61,7 +73,7 @@ class _RateLimitTransport(httpx.AsyncBaseTransport):
         )
 
 
-def _proxy_with(transport: _RateLimitTransport, *, max_attempts: int = 3):
+def _proxy_with(transport: _RateLimitTransport, *, max_attempts: int = 3) -> HeadroomProxy:
     config = ProxyConfig(
         optimize=False,
         cache_enabled=False,
@@ -73,11 +85,16 @@ def _proxy_with(transport: _RateLimitTransport, *, max_attempts: int = 3):
         ccr_context_tracking=False,
         image_optimize=False,
         retry_enabled=True,
+        # This file is about the retry-with-backoff path itself (#1221), which
+        # is opt-in as of D1G-2249 (default False — see
+        # tests/test_proxy/test_overload_passthrough.py for the default-off
+        # contract), so every proxy built here opts back in explicitly.
+        retry_overload_enabled=True,
         retry_max_attempts=max_attempts,
         retry_base_delay_ms=1,
         retry_max_delay_ms=5000,
     )
-    proxy = create_app(config).state.proxy
+    proxy = cast(HeadroomProxy, create_app(config).state.proxy)
     proxy.http_client = httpx.AsyncClient(transport=transport)
     return proxy
 
@@ -102,7 +119,7 @@ def test_retry_request_returns_429_verbatim_on_exhaustion() -> None:
     assert transport.calls == 3  # exhausted all attempts
 
 
-def test_retry_request_honors_retry_after(monkeypatch) -> None:
+def test_retry_request_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
     slept: list[float] = []
 
     async def _fake_wait(self, seconds: float) -> bool:  # type: ignore[no-untyped-def]
@@ -186,7 +203,7 @@ def test_retry_request_returns_529_verbatim_on_exhaustion() -> None:
     assert transport.calls == 3  # exhausted all attempts, returned verbatim
 
 
-def test_retry_request_honors_retry_after_on_529(monkeypatch) -> None:
+def test_retry_request_honors_retry_after_on_529(monkeypatch: pytest.MonkeyPatch) -> None:
     slept: list[float] = []
 
     async def _fake_wait(self, seconds: float) -> bool:  # type: ignore[no-untyped-def]

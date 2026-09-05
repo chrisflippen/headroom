@@ -786,6 +786,11 @@ def test_retry_request_returns_503_when_shutdown_interrupts_retry_sleep() -> Non
     proxy.http_client = _Always429Client()
     proxy.config = SimpleNamespace(
         retry_enabled=True,
+        # This test is about the shutdown-interrupts-retry-sleep path, which is
+        # only reachable for a 429/529 when overload retry is opted in
+        # (D1G-2249 default is False — see
+        # tests/test_proxy/test_overload_passthrough.py).
+        retry_overload_enabled=True,
         retry_max_attempts=3,
         retry_base_delay_ms=30000,
         retry_max_delay_ms=30000,

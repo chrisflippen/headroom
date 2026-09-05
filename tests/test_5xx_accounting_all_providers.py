@@ -8,29 +8,35 @@ recorded as failed and skips the savings/cost funnel rather than inflating the
 save-rate. Each case below corresponds to one wired call site.
 """
 
-import asyncio
+from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any, cast
+
+import httpx
 import pytest
+from starlette.requests import Request
 
 from headroom.proxy.outcome import RequestOutcome, emit_request_outcome
 
 
 class _Metrics:
-    def __init__(self):
-        self.failed = []
-        self.requested = []
+    def __init__(self) -> None:
+        self.failed: list[str] = []
+        self.requested: list[dict[str, Any]] = []
 
-    async def record_failed(self, provider):
+    async def record_failed(self, provider: str) -> None:
         self.failed.append(provider)
 
-    async def record_request(self, **kwargs):
+    async def record_request(self, **kwargs: Any) -> None:
         self.requested.append(kwargs)
 
 
 class _Handler:
     # Minimal stub: if emit_request_outcome escapes the >=500 guard it reaches
     # the success funnel and AttributeErrors on cost_tracker/logger.
-    def __init__(self):
+    def __init__(self) -> None:
         self.metrics = _Metrics()
 
 
@@ -48,7 +54,7 @@ WIRED_SITES = [
 
 
 @pytest.mark.parametrize("label,provider,status", WIRED_SITES)
-def test_exhausted_5xx_recorded_as_failed(label, provider, status):
+def test_exhausted_5xx_recorded_as_failed(label: str, provider: str, status: int) -> None:
     handler = _Handler()
     outcome = RequestOutcome(
         request_id=f"req-{label}",
@@ -84,32 +90,25 @@ def test_exhausted_5xx_recorded_as_failed(label, provider, status):
 # Overloaded surfaced after retry exhaustion").
 
 
-class _Always529Transport:
+class _Always529Transport(httpx.AsyncBaseTransport):
     """httpx transport returning 529 every call (overload, exhausts retries)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.calls = 0
 
-    async def handle_async_request(self, request):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
-        async for _ in request.stream:  # drain body
+        stream = cast(AsyncIterator[bytes], request.stream)
+        async for _ in stream:  # drain body
             pass
-        return _httpx().Response(529, json={"error": {"message": "overloaded"}})
+        return httpx.Response(529, json={"error": {"message": "overloaded"}})
 
-    async def aclose(self):  # let AsyncClient.aclose() tear down cleanly
+    async def aclose(self) -> None:  # let AsyncClient.aclose() tear down cleanly
         pass
 
 
-def _httpx():
-    import httpx
-
-    return httpx
-
-
-def _count_tokens_request(body_bytes: bytes):
+def _count_tokens_request(body_bytes: bytes) -> Request:
     """Real Starlette Request over an ASGI scope (exercises body parsing)."""
-    from starlette.requests import Request
-
     scope = {
         "type": "http",
         "method": "POST",
@@ -120,7 +119,7 @@ def _count_tokens_request(body_bytes: bytes):
     }
     sent = {"done": False}
 
-    async def receive():
+    async def receive() -> dict[str, Any]:
         if sent["done"]:
             return {"type": "http.disconnect"}
         sent["done"] = True
@@ -129,7 +128,7 @@ def _count_tokens_request(body_bytes: bytes):
     return Request(scope, receive)
 
 
-def test_gemini_count_tokens_handler_threads_real_529_onto_outcome():
+def test_gemini_count_tokens_handler_threads_real_529_onto_outcome() -> None:
     import json
 
     from headroom.proxy.server import ProxyConfig, create_app
@@ -145,6 +144,10 @@ def test_gemini_count_tokens_handler_threads_real_529_onto_outcome():
         ccr_context_tracking=False,
         image_optimize=False,
         retry_enabled=True,
+        # This test is specifically about the retry-exhaustion accounting path
+        # for a 529, which is opt-in as of D1G-2249 (default False — see
+        # tests/test_proxy/test_overload_passthrough.py), so opt back in here.
+        retry_overload_enabled=True,
         retry_max_attempts=2,
         retry_base_delay_ms=1,
         retry_max_delay_ms=5,
@@ -152,12 +155,12 @@ def test_gemini_count_tokens_handler_threads_real_529_onto_outcome():
     proxy = create_app(config).state.proxy
     original_client = proxy.http_client
     transport = _Always529Transport()
-    injected_client = _httpx().AsyncClient(transport=transport)
+    injected_client = httpx.AsyncClient(transport=transport)
     proxy.http_client = injected_client
 
-    captured = []
+    captured: list[RequestOutcome] = []
 
-    async def _capture(outcome):
+    async def _capture(outcome: RequestOutcome) -> None:
         captured.append(outcome)
 
     proxy._record_request_outcome = _capture  # capture, skip the funnel
@@ -165,7 +168,7 @@ def test_gemini_count_tokens_handler_threads_real_529_onto_outcome():
     body = json.dumps({"contents": [{"role": "user", "parts": [{"text": "hello world"}]}]}).encode()
     request = _count_tokens_request(body)
 
-    async def _run():
+    async def _run() -> None:
         try:
             await proxy.handle_gemini_count_tokens(request, model="gemini-2.0-flash")
         finally:

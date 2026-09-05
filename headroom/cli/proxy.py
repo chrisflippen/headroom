@@ -494,6 +494,18 @@ def dashboard(port: int, no_open: bool) -> None:
     ),
 )
 @click.option(
+    "--retry-overload",
+    is_flag=True,
+    envvar="HEADROOM_RETRY_OVERLOAD",
+    help=(
+        "Retry an upstream 429 (rate limit) or 529 (overloaded) with backoff, "
+        "honoring Retry-After, instead of forwarding it to the client verbatim "
+        "and immediately (default: off — rate limiting is Anthropic's job and "
+        "the client's job, not the proxy's; Claude Code already handles 429/529 "
+        "itself, but only if it sees the status promptly). Env: HEADROOM_RETRY_OVERLOAD."
+    ),
+)
+@click.option(
     "--request-timeout-seconds",
     type=int,
     default=None,
@@ -1053,6 +1065,7 @@ def proxy(
     retry_max_attempts: int | None,
     retry_base_delay_ms: int | None,
     retry_max_delay_ms: int | None,
+    retry_overload: bool,
     request_timeout_seconds: int | None,
     connect_timeout_seconds: int | None,
     write_timeout_seconds: int | None,
@@ -1384,6 +1397,7 @@ def proxy(
         retry_max_attempts=retry_max_attempts if retry_max_attempts is not None else 3,
         retry_base_delay_ms=retry_base_delay_ms if retry_base_delay_ms is not None else 1000,
         retry_max_delay_ms=retry_max_delay_ms if retry_max_delay_ms is not None else 30000,
+        retry_overload_enabled=retry_overload,
         request_timeout_seconds=request_timeout_seconds
         if request_timeout_seconds is not None and request_timeout_seconds > 0
         else 300,

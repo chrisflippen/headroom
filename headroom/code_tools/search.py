@@ -3,9 +3,14 @@
 The code agent reaches files only through Search — never the built-in Read,
 Grep, or Glob. Five actions live on this one entry point:
 
-- ``read``: a smarter Read. Returns a file's content once, then a short
-  "unchanged" marker on every later read of the same, unmodified file, so
-  the model never pays tokens to see the same bytes twice.
+- ``read``: a smarter Read. Every read's header carries a stamp — a short
+  hash of the file's bytes. Pass that stamp back on a later read of the same
+  file and, if it still matches, Search returns a one-line "unchanged"
+  marker instead of the text, so the model never pays tokens to see the
+  same bytes twice. No cache is kept anywhere: the stamp only proves what
+  the caller already holds, so a helper agent or a session that just went
+  through a context compaction — neither of which has the stamp — always
+  gets the full text.
 - ``find``: a smarter Glob. Lists files matching a pattern, honoring
   .gitignore.
 - ``grep``: a smarter Grep. Runs ripgrep when it's available, else a plain
@@ -28,8 +33,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from headroom.cache.compression_store import get_compression_store
-from headroom.code_tools.read_cache import ReadCache
 from headroom.proxy.helpers import safe_decode_for_logging
 from headroom.transforms.code_compressor import (
     _LANG_CONFIGS,
@@ -39,11 +42,16 @@ from headroom.transforms.code_compressor import (
     detect_language,
 )
 
-# Session-scoped: content lives as long as the coding session, matching the
-# MCP server's own MCP_SESSION_TTL (headroom/ccr/mcp_server.py). Kept as its
-# own constant here rather than imported, so this module never has to import
-# the MCP server module (mcp_server imports this module, not the other way).
-SESSION_TTL = 3600
+_STAMP_LENGTH = 12
+
+
+def file_stamp(content: str) -> str:
+    """Return the stamp for a file's content: the first 12 hex characters of
+    the sha256 hash of its bytes. Two reads of the same bytes get the same
+    stamp; any change to the bytes changes it. Shared with ``edit.py`` so a
+    write reports the same stamp a read of the result would."""
+
+    return hashlib.sha256(content.encode()).hexdigest()[:_STAMP_LENGTH]
 
 
 class PathOutsideRootError(ValueError):
@@ -87,7 +95,7 @@ def _read_file_text(path: Path) -> str:
     return safe_decode_for_logging(path.read_bytes())
 
 
-def _read_range(content: str, raw_path: str, start: Any, end: Any) -> str:
+def _read_range(content: str, rel: str, start: Any, end: Any, stamp: str) -> str:
     lines = content.split("\n")
     total = len(lines)
     try:
@@ -103,7 +111,7 @@ def _read_range(content: str, raw_path: str, start: Any, end: Any) -> str:
 
     selected = lines[start_line - 1 : end_line]
     numbered = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(selected, start_line))
-    header = f"{raw_path}: lines {start_line}-{end_line} of {total}"
+    header = f"{rel}: lines {start_line}-{end_line} of {total} stamp={stamp}"
     return f"{header}\n{numbered}"
 
 
@@ -128,49 +136,20 @@ def _handle_read(request: dict[str, Any], root: Path) -> str:
     except OSError as exc:
         return f"error: cannot read file: {exc}"
 
+    rel = path.relative_to(root.resolve()).as_posix()
+    stamp = file_stamp(content)
+
     start = request.get("start")
     end = request.get("end")
     if start is not None or end is not None:
-        return _read_range(content, raw_path, start, end)
+        return _read_range(content, rel, start, end, stamp)
 
-    fresh = bool(request.get("fresh", False))
-    content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
     line_count = _line_count(content)
-    str_path = str(path)
-    cache = ReadCache()
+    provided_stamp = request.get("stamp")
+    if isinstance(provided_stamp, str) and provided_stamp == stamp:
+        return f'<file path="{rel}" status="unchanged" lines="{line_count}" stamp="{stamp}"/>'
 
-    if not fresh:
-        entry = cache.get(str_path)
-        if entry is not None and entry.content_hash == content_hash:
-            store = get_compression_store()
-            if store.exists(entry.store_hash):
-                return (
-                    f'<file path="{raw_path}" status="unchanged" '
-                    f'lines="{entry.line_count}" hash="{entry.store_hash}"/>'
-                )
-            # The compression store entry expired — the marker's hash would
-            # 404 on retrieval, so treat this like a fresh file and re-store.
-            cache.invalidate(str_path)
-
-    store = get_compression_store()
-    token_estimate = len(content.split())
-    store_hash = store.store(
-        original=content,
-        compressed=f"[File: {path.name}, {line_count} lines]",
-        original_tokens=token_estimate,
-        compressed_tokens=5,
-        tool_name="search_read",
-        ttl=SESSION_TTL,
-    )
-    cache.put(
-        str_path,
-        content_hash=content_hash,
-        store_hash=store_hash,
-        line_count=line_count,
-        token_estimate=token_estimate,
-    )
-
-    header = f"{raw_path}: {line_count} lines"
+    header = f"file: {rel} lines={line_count} stamp={stamp}"
     return f"{header}\n{_numbered_lines(content)}"
 
 

@@ -3,28 +3,21 @@
 The code agent changes files only through Edit — never the built-in Edit or
 Write. One entry point, five actions: ``replace`` and ``multi`` patch text
 in an existing file, ``create`` makes a new one, ``delete`` removes one, and
-``rename`` moves one. Every action that changes a file refreshes Search's
-read cache for that path, the same way a fresh Search read would, so the
-model's next Search read of it comes back as the unchanged marker instead of
-paying for the bytes again.
+``rename`` moves one. Every action that writes new bytes to a file ends its
+result line with a stamp for the new content, so the caller can pass that
+stamp back to Search later instead of reading the file again.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from headroom import fsutil
-from headroom.cache.compression_store import get_compression_store
-from headroom.code_tools.read_cache import ReadCache
-from headroom.code_tools.search import PathOutsideRootError, resolve_path
+from headroom.code_tools.search import PathOutsideRootError, file_stamp, resolve_path
 from headroom.proxy.helpers import safe_decode_for_logging
-
-# Session-scoped, matching Search's own SESSION_TTL (headroom/code_tools/search.py).
-SESSION_TTL = 3600
 
 
 def _read_file_text(path: Path) -> str:
@@ -53,31 +46,6 @@ def _resolve(raw_path: str, root: Path) -> Path | str:
         return f"error: refused: path under .git: {raw_path}"
 
     return path
-
-
-def _refresh_cache(path: Path, content: str) -> None:
-    """Store the new content the same way Search stores a fresh read, so the
-    next Search read of this file returns the unchanged marker."""
-
-    content_hash = hashlib.sha256(content.encode()).hexdigest()[:24]
-    line_count = _line_count(content)
-    token_estimate = len(content.split())
-    store = get_compression_store()
-    store_hash = store.store(
-        original=content,
-        compressed=f"[File: {path.name}, {line_count} lines]",
-        original_tokens=token_estimate,
-        compressed_tokens=5,
-        tool_name="Edit",
-        ttl=SESSION_TTL,
-    )
-    ReadCache().put(
-        str(path),
-        content_hash=content_hash,
-        store_hash=store_hash,
-        line_count=line_count,
-        token_estimate=token_estimate,
-    )
 
 
 def _find_occurrences(content: str, old: str) -> list[int]:
@@ -152,8 +120,8 @@ def _handle_replace(request: dict[str, Any], root: Path) -> str:
         summary = f"replaced 1 occurrence (lines {start_line}-{end_line})"
 
     fsutil.write_text(path, new_content)
-    _refresh_cache(path, new_content)
-    return f"edited {raw_path}: {summary}"
+    stamp = file_stamp(new_content)
+    return f"edited {raw_path}: {summary} stamp={stamp}"
 
 
 def _handle_multi(request: dict[str, Any], root: Path) -> str:
@@ -205,8 +173,8 @@ def _handle_multi(request: dict[str, Any], root: Path) -> str:
         running = running[:offset] + new + running[offset + len(old) :]
 
     fsutil.write_text(path, running)
-    _refresh_cache(path, running)
-    return f"edited {raw_path}: applied {len(edits)} edits"
+    stamp = file_stamp(running)
+    return f"edited {raw_path}: applied {len(edits)} edits stamp={stamp}"
 
 
 def _handle_create(request: dict[str, Any], root: Path) -> str:
@@ -234,10 +202,10 @@ def _handle_create(request: dict[str, Any], root: Path) -> str:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fsutil.write_text(path, content)
-    _refresh_cache(path, content)
+    stamp = file_stamp(content)
     line_count = _line_count(content)
     plural = "" if line_count == 1 else "s"
-    return f"created {raw_path}: {line_count} line{plural}"
+    return f"created {raw_path}: {line_count} line{plural} stamp={stamp}"
 
 
 def _handle_delete(request: dict[str, Any], root: Path) -> str:
@@ -257,7 +225,6 @@ def _handle_delete(request: dict[str, Any], root: Path) -> str:
         return f"error: refused: path is a directory: {raw_path}"
 
     path.unlink()
-    ReadCache().invalidate(str(path))
     return f"deleted {raw_path}"
 
 
@@ -288,14 +255,6 @@ def _handle_rename(request: dict[str, Any], root: Path) -> str:
 
     target.parent.mkdir(parents=True, exist_ok=True)
     os.replace(path, target)
-    ReadCache().invalidate(str(path))
-
-    try:
-        content = _read_file_text(target)
-    except OSError:
-        content = None
-    if content is not None:
-        _refresh_cache(target, content)
 
     return f"renamed {raw_path} -> {raw_to}"
 

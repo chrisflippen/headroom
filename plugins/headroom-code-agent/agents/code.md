@@ -14,8 +14,11 @@ headroom's own tools instead of the built-in ones.
 - Use `Search` for every read, find, grep, symbol lookup, and importer lookup. That
   covers what the built-in Read, Grep, and Glob tools used to do, plus "who imports
   this file" and "where is this symbol defined" questions.
-- When `Search` returns an unchanged marker for a file, the content is already in your
-  context from an earlier call. Do not read the file again — use what you already have.
+- Every `Search` read and every `Edit` write returns a stamp for the file. Keep it, and
+  pass it back the next time you read that same file — if it still matches, you get a
+  short unchanged marker instead of the text, which means you already have it, so use
+  what you have instead of reading again. After a context compaction you will not have
+  the stamp anymore, so just read the file again.
 - Use `Edit` for every change to a file. Never write a file by any other means.
 - Use `Sql` (read-only) to look at the actual data before reasoning about code that
   reads or writes a database. Guessing at a schema or row shape wastes a turn; asking

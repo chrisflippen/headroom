@@ -9,6 +9,10 @@ Tools:
     headroom_stats      — Session compression statistics
     Search              — Read project files, with an unchanged-file marker
                            that saves tokens on repeat reads
+    Edit                — Change project files: replace text, create,
+                           delete, or rename
+    Sql                 — Run a read-only query or view the schema for a
+                           named database connection
 
 Usage:
     # As standalone server (stdio transport, called by AI coding tools)
@@ -76,6 +80,8 @@ CCR_TOOL_NAME = "headroom_retrieve"
 COMPRESS_TOOL_NAME = "headroom_compress"
 STATS_TOOL_NAME = "headroom_stats"
 SEARCH_TOOL_NAME = "Search"
+EDIT_TOOL_NAME = "Edit"
+SQL_TOOL_NAME = "Sql"
 
 logger = logging.getLogger("headroom.ccr.mcp")
 
@@ -663,16 +669,16 @@ class HeadroomMCPServer:
             Tool(
                 name=SEARCH_TOOL_NAME,
                 description=(
-                    "Use this tool for every file and code lookup — never the built-in Read, "
-                    "Glob, or Grep tools. 'read' returns a file's numbered lines, then a short "
-                    "unchanged marker instead of the full text on later reads of the same "
-                    "content, so don't re-read or treat that as missing. Use 'find' instead of "
-                    "Glob to list files by pattern, honoring .gitignore. Use 'grep' instead of "
-                    "Grep to search file contents, grouped by file. Use 'symbols' to see a "
-                    "file's classes, functions, and types before reading it whole. Use "
-                    "'importers' before renaming or changing a public symbol, to see what "
-                    "else would break. Pass start/end for a line range on read, fresh=true to "
-                    "force a full read."
+                    "Use this for every file and code lookup — never the built-in Read, Glob, "
+                    "or Grep. 'read' returns numbered lines and a stamp; pass the stamp back "
+                    "on a later read of the same file to get a short unchanged marker instead "
+                    "of the text if it still matches. That marker means you already have the "
+                    "content — don't re-read it or call it missing. 'find' lists files by "
+                    "pattern, honoring .gitignore, instead of Glob. 'grep' searches file "
+                    "contents, grouped by file, instead of Grep. 'symbols' shows a file's "
+                    "classes, functions, and types before you read it whole. 'importers' "
+                    "shows what would break before you rename or change a public symbol. Pass "
+                    "start/end for a line range on read."
                 ),
                 inputSchema={
                     "type": "object",
@@ -719,14 +725,123 @@ class HeadroomMCPServer:
                             "type": "integer",
                             "description": "Last line to return (1-based, inclusive).",
                         },
-                        "fresh": {
-                            "type": "boolean",
+                        "stamp": {
+                            "type": "string",
                             "description": (
-                                "Force a full read, ignoring the unchanged-file cache."
+                                "the stamp from your earlier read of this file; pass it back to "
+                                "get a one-line marker instead of the text when the file has not "
+                                "changed"
                             ),
                         },
                     },
                     "required": ["action"],
+                },
+            ),
+            Tool(
+                name=EDIT_TOOL_NAME,
+                description=(
+                    "Use this tool for every file change — never the built-in Edit or Write "
+                    "tools. 'replace' swaps one piece of text for another; pass all=true if it "
+                    "appears more than once and you want every occurrence changed. 'multi' "
+                    "applies several replacements to one file in order, or writes none of them "
+                    "if any fails. 'create' makes a new file (or overwrites one if you pass "
+                    "overwrite=true). 'delete' removes a file. 'rename' moves a file to a new "
+                    "path given in 'to'. Every action that writes a file returns a new stamp; "
+                    "pass that to Search's 'read' later instead of reading the file again."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["replace", "multi", "create", "delete", "rename"],
+                            "description": "Which Edit action to run.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file, relative to the project root or absolute.",
+                        },
+                        "old": {
+                            "type": "string",
+                            "description": "For replace: the exact text to find and replace.",
+                        },
+                        "new": {
+                            "type": "string",
+                            "description": "For replace: the text to put in place of 'old'.",
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "For replace: replace every occurrence, not just one.",
+                        },
+                        "edits": {
+                            "type": "array",
+                            "description": (
+                                "For multi: a list of {old, new} pairs to apply in order."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old": {"type": "string"},
+                                    "new": {"type": "string"},
+                                },
+                            },
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "For create: the full text of the new file.",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "For create: replace the file if it already exists.",
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "For rename: the new path for the file.",
+                        },
+                    },
+                    "required": ["action", "path"],
+                },
+            ),
+            Tool(
+                name=SQL_TOOL_NAME,
+                description=(
+                    "Run a read-only SQL query, or look at the schema, for a database "
+                    "connection set up ahead of time under a short name — this tool never "
+                    "sees a raw connection URL or password. Use action='schema' to list "
+                    "tables and columns before writing a query. Otherwise pass 'sql' with a "
+                    "single SELECT (or WITH/EXPLAIN/SHOW/PRAGMA) statement; writes and "
+                    "multiple statements are refused. 'limit' caps how many rows come back. "
+                    "If the connection name is not recognized, the error lists the names that "
+                    "are."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "connection": {
+                            "type": "string",
+                            "description": "The short name of a connection set up ahead of time.",
+                        },
+                        "sql": {
+                            "type": "string",
+                            "description": (
+                                "A single read-only SQL statement (SELECT, WITH, EXPLAIN, SHOW, "
+                                "or PRAGMA)."
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Cap on the number of rows returned.",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["query", "schema"],
+                            "description": (
+                                "'query' runs 'sql' (the default). 'schema' lists tables and "
+                                "columns instead."
+                            ),
+                        },
+                    },
+                    "required": ["connection"],
                 },
             ),
         ]
@@ -755,6 +870,10 @@ class HeadroomMCPServer:
                     result = await self._handle_stats()
                 elif name == SEARCH_TOOL_NAME:
                     result = await self._handle_search(arguments)
+                elif name == EDIT_TOOL_NAME:
+                    result = await self._handle_edit(arguments)
+                elif name == SQL_TOOL_NAME:
+                    result = await self._handle_sql(arguments)
                 else:
                     result = [
                         TextContent(
@@ -977,12 +1096,15 @@ class HeadroomMCPServer:
     async def _handle_search(self, arguments: dict[str, Any]) -> list[TextContent]:
         """Handle the Search tool call by running it against code_tools.search.
 
-        Path handling and caching live in headroom.code_tools.search — this
+        Path handling and the stamp live in headroom.code_tools.search — this
         method just calls it and, on an unchanged-file marker, records the
-        token savings the same way the rest of this server does.
+        token savings the same way the rest of this server does. There is no
+        cache to consult here: the marker only comes back when the caller's
+        own stamp already matched, so the file is read once more just to
+        estimate how many tokens the marker saved.
         """
         from headroom.code_tools import search as code_tools_search
-        from headroom.code_tools.read_cache import ReadCache
+        from headroom.proxy.helpers import safe_decode_for_logging
 
         text = code_tools_search.search(arguments, root=Path.cwd())
 
@@ -991,12 +1113,54 @@ class HeadroomMCPServer:
                 raw_path = arguments.get("path")
                 if raw_path:
                     resolved = code_tools_search.resolve_path(str(raw_path), Path.cwd())
-                    entry = ReadCache().get(str(resolved))
-                    if entry is not None:
-                        self._stats.record_compression(entry.token_estimate, 5, "search_unchanged")
+                    content = safe_decode_for_logging(resolved.read_bytes())
+                    token_estimate = len(content.split())
+                    self._stats.record_compression(token_estimate, 5, "search_unchanged")
             except Exception:
                 # Stats bookkeeping must never break the tool call itself.
                 pass
+
+        return [TextContent(type="text", text=text)]
+
+    async def _handle_edit(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle the Edit tool call by running it against code_tools.edit."""
+        from headroom.code_tools import edit as code_tools_edit
+
+        text = code_tools_edit.edit(arguments, Path.cwd())
+        return [TextContent(type="text", text=text)]
+
+    async def _handle_sql(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle the Sql tool call by resolving a named connection and
+        running the query (or schema lookup) against code_tools.sql.
+
+        The MCP schema offers a friendlier ``action`` of "query" or
+        "schema", but code_tools.sql only understands ``action`` missing
+        (meaning "query") or set to "schema", so "query" is dropped before
+        the call. An unknown connection name comes back from the resolver
+        as a KeyError; this method turns that into a plain error line that
+        also lists every connection name that is known.
+        """
+        from headroom.code_tools import connections
+        from headroom.code_tools import sql as code_tools_sql
+
+        request = dict(arguments)
+        if request.get("action") == "query":
+            del request["action"]
+
+        keychain = connections.MacOSKeychain()
+
+        def resolver(name: str) -> str:
+            return connections.resolve_connection(name, keychain)
+
+        try:
+            text = code_tools_sql.query(request, resolver)
+        except KeyError as exc:
+            message = str(exc.args[0]) if exc.args else str(exc)
+            known = connections.list_connections()
+            if known:
+                text = f"Refused: {message}. Known connections: {', '.join(known)}."
+            else:
+                text = f"Refused: {message}. No connections are configured."
 
         return [TextContent(type="text", text=text)]
 

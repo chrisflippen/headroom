@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from pathlib import Path
 
 import pytest
 
+from headroom import paths
 from headroom.cache import compression_store as compression_store_module
 from headroom.cache.compression_store import (
     get_compression_store,
     reset_compression_store,
 )
+from headroom.code_tools import connections
 from tests._mcp_stub import import_module_with_mcp_stub
 
 mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")
@@ -492,3 +495,67 @@ def test_run_stdio_reaps_process_on_parent_death(monkeypatch) -> None:
 
     assert excinfo.value.args[0] == 0
     assert cleaned["done"] is True
+
+
+# --- Edit and Sql MCP wiring -------------------------------------------------
+
+
+def test_edit_and_sql_tools_are_registered() -> None:
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    tools = server._tool_definitions()
+    names = [t.kwargs["name"] for t in tools]
+
+    assert "Edit" in names
+    assert "Sql" in names
+
+    sql_tool = next(t for t in tools if t.kwargs["name"] == "Sql")
+    schema = sql_tool.kwargs["inputSchema"]
+    assert schema["properties"]["action"]["enum"] == ["query", "schema"]
+    for field in ["connection", "sql", "limit"]:
+        assert field in schema["properties"]
+    assert len(sql_tool.kwargs["description"].split()) < 120
+
+
+@pytest.fixture
+def _sql_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Isolate the connections config file and stand in one persistent
+    MemoryKeychain for the real macOS keychain, so a Sql wiring test never
+    touches the filesystem's real config dir or the actual keychain."""
+
+    monkeypatch.setenv(paths.HEADROOM_CONFIG_DIR_ENV, str(tmp_path))
+    keychain = connections.MemoryKeychain()
+    monkeypatch.setattr(connections, "MacOSKeychain", lambda: keychain)
+    return tmp_path
+
+
+def test_handle_sql_runs_a_query_against_a_known_connection(
+    _sql_config_dir: Path, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "app.sqlite"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+    conn.execute("INSERT INTO users VALUES (1, 'Alice')")
+    conn.commit()
+    conn.close()
+
+    keychain = connections.MacOSKeychain()
+    connections.add_connection("mydb", f"sqlite://{db_path}", keychain)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    response = asyncio.run(server._handle_sql({"connection": "mydb", "sql": "SELECT * FROM users"}))
+
+    assert "Alice" in response[0].kwargs["text"]
+
+
+def test_handle_sql_unknown_connection_lists_known_names(_sql_config_dir: Path) -> None:
+    keychain = connections.MacOSKeychain()
+    connections.add_connection("mydb", "sqlite:///anything.sqlite", keychain)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    response = asyncio.run(server._handle_sql({"connection": "nope", "sql": "SELECT 1"}))
+
+    text = response[0].kwargs["text"]
+    assert "nope" in text
+    assert "mydb" in text

@@ -2,33 +2,33 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from headroom.cache.compression_store import reset_compression_store
 from headroom.code_tools.edit import edit
-from headroom.code_tools.search import search
+from headroom.code_tools.search import file_stamp
+from tests._mcp_stub import import_module_with_mcp_stub
+
+mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")
 
 V1_CONTENT = "print('hello')\nprint('world')"
 
-# Known sha256("print('hello')\nprint('world')").hexdigest()[:24] — same
-# literal used in tests/test_code_tools_search.py for the same bytes. The
-# compression store hashes content with this exact formula.
-V1_HASH = "19a9b60d67d74ebb7730a9fa"
-
-
-@pytest.fixture(autouse=True)
-def _fresh_store() -> Iterator[None]:
-    reset_compression_store()
-    yield
-    reset_compression_store()
+# Known stamps: the first 12 hex characters of sha256(content.encode()).
+# Precomputed once, hardcoded here — never recomputed by calling the code
+# under test.
+REPLACE_RESULT_STAMP = "fc0b85ca6901"  # "first\nnew line\nlast\n"
+REPLACE_ALL_STAMP = "66d725133e00"  # "x = 2\nx = 2\n"
+MULTI_RESULT_STAMP = "37d16a23a527"  # "ALPHA\nbeta\nGAMMA\n"
+CREATE_CONTENT_STAMP = "caf026f25d71"  # "print('hi')\n"
+CREATE_OVERWRITE_STAMP = "1d054714357c"  # "replacement\n"
+CRLF_RESULT_STAMP = "fa950abca236"  # "first\r\nnew line\r\nlast\r\n"
 
 
 @pytest.fixture(autouse=True)
 def _workspace(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Point the read cache's workspace root at a throwaway dir for every test."""
+    """Point the workspace root at a throwaway dir for every test."""
 
     ws = tmp_path_factory.mktemp("ws")
     monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(ws))
@@ -63,7 +63,7 @@ def test_replace_one_match_writes_expected_file(tmp_path: Path) -> None:
         {"action": "replace", "path": "a.py", "old": "old line", "new": "new line"}, tmp_path
     )
 
-    assert result == "edited a.py: replaced 1 occurrence (lines 2-2)"
+    assert result == f"edited a.py: replaced 1 occurrence (lines 2-2) stamp={REPLACE_RESULT_STAMP}"
     assert target.read_text() == "first\nnew line\nlast\n"
 
 
@@ -79,7 +79,7 @@ def test_replace_all_true_replaces_both(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert result == "edited a.py: replaced 2 occurrences"
+    assert result == f"edited a.py: replaced 2 occurrences stamp={REPLACE_ALL_STAMP}"
     assert target.read_text() == "x = 2\nx = 2\n"
 
 
@@ -102,7 +102,7 @@ def test_multi_applies_two_edits_in_order(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert result == "edited a.py: applied 2 edits"
+    assert result == f"edited a.py: applied 2 edits stamp={MULTI_RESULT_STAMP}"
     assert target.read_text() == "ALPHA\nbeta\nGAMMA\n"
 
 
@@ -135,7 +135,7 @@ def test_create_makes_parent_folders(tmp_path: Path) -> None:
         {"action": "create", "path": "new/dir/b.py", "content": "print('hi')\n"}, tmp_path
     )
 
-    assert result == "created new/dir/b.py: 1 line"
+    assert result == f"created new/dir/b.py: 1 line stamp={CREATE_CONTENT_STAMP}"
     assert (tmp_path / "new" / "dir" / "b.py").read_text() == "print('hi')\n"
 
 
@@ -158,7 +158,7 @@ def test_create_overwrites_when_asked(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert result == "created b.py: 1 line"
+    assert result == f"created b.py: 1 line stamp={CREATE_OVERWRITE_STAMP}"
     assert target.read_text() == "replacement\n"
 
 
@@ -217,17 +217,21 @@ def test_rename_moves_a_file(tmp_path: Path) -> None:
     assert (tmp_path / "b.py").read_text() == V1_CONTENT
 
 
-# --- 8. cache contract: an edit refreshes Search's read cache ----------------
+# --- 8. stamp contract: Edit's stamp matches Search's stamp for the result ---
 
 
-def test_edit_refreshes_search_read_cache(tmp_path: Path) -> None:
+def test_edit_returns_the_same_stamp_search_would_compute_for_the_result(tmp_path: Path) -> None:
     target = tmp_path / "a.py"
     target.write_text("print('hi')\nprint('world')")
 
-    edit({"action": "replace", "path": "a.py", "old": "hi", "new": "hello"}, tmp_path)
-    result = search({"action": "read", "path": "a.py"}, root=tmp_path)
+    # "print('hi')\nprint('world')" with "hi" -> "hello" becomes
+    # "print('hello')\nprint('world')", the exact bytes V1_CONTENT names in
+    # tests/test_code_tools_search.py — this is the same known stamp,
+    # confirming edit.py and search.py compute file_stamp identically.
+    result = edit({"action": "replace", "path": "a.py", "old": "hi", "new": "hello"}, tmp_path)
 
-    assert result == f'<file path="a.py" status="unchanged" lines="2" hash="{V1_HASH}"/>'
+    assert result == "edited a.py: replaced 1 occurrence (lines 1-1) stamp=19a9b60d67d7"
+    assert file_stamp(target.read_text()) == "19a9b60d67d7"
 
 
 # --- 9. a .git path is refused -------------------------------------------------
@@ -257,5 +261,40 @@ def test_crlf_file_stays_crlf(tmp_path: Path) -> None:
         {"action": "replace", "path": "a.py", "old": "old line", "new": "new line"}, tmp_path
     )
 
-    assert result == "edited a.py: replaced 1 occurrence (lines 2-2)"
+    assert result == f"edited a.py: replaced 1 occurrence (lines 2-2) stamp={CRLF_RESULT_STAMP}"
     assert target.read_bytes() == b"first\r\nnew line\r\nlast\r\n"
+
+
+# --- 11. MCP wiring: Edit is registered and reachable through the server ----
+
+
+def test_edit_tool_is_registered() -> None:
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    tools = server._tool_definitions()
+    names = [t.kwargs["name"] for t in tools]
+
+    assert "Edit" in names
+    edit_tool = next(t for t in tools if t.kwargs["name"] == "Edit")
+    schema = edit_tool.kwargs["inputSchema"]
+    assert schema["properties"]["action"]["enum"] == [
+        "replace",
+        "multi",
+        "create",
+        "delete",
+        "rename",
+    ]
+    for field in ["path", "old", "new", "all", "edits", "content", "overwrite", "to"]:
+        assert field in schema["properties"]
+    assert len(edit_tool.kwargs["description"].split()) < 120
+
+
+def test_handle_edit_create_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    response = asyncio.run(
+        server._handle_edit({"action": "create", "path": "a.py", "content": "print('hi')\n"})
+    )
+
+    assert response[0].kwargs["text"] == f"created a.py: 1 line stamp={CREATE_CONTENT_STAMP}"
+    assert (tmp_path / "a.py").read_text() == "print('hi')\n"

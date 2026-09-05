@@ -327,7 +327,7 @@ def bin_dir() -> Path:
 
 
 def code_tools_dir() -> Path:
-    """Return the directory holding code-agent tool state (e.g. the read cache)."""
+    """Return the directory holding code-agent tool state."""
 
     return workspace_dir() / _CODE_TOOLS_DIR
 

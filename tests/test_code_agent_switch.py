@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from click.testing import CliRunner
@@ -68,6 +69,7 @@ def test_ensure_agent_switch_preserves_unrelated_keys(tmp_path: Path) -> None:
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
+        "mcp__headroom__SendMessage",
     ]
 
 
@@ -82,6 +84,7 @@ _EXPECTED_ALLOW_RULES = [
     "mcp__headroom__headroom_compress",
     "mcp__headroom__headroom_retrieve",
     "mcp__headroom__headroom_stats",
+    "mcp__headroom__SendMessage",
 ]
 
 
@@ -125,6 +128,7 @@ def test_ensure_agent_switch_does_not_duplicate_a_pre_existing_allow_rule(
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
+        "mcp__headroom__SendMessage",
     ]
 
 
@@ -168,7 +172,7 @@ def test_agent_switch_state_on_after_ensure(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (6 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (7 allow rules)"
 
 
 def test_agent_switch_state_reports_user_set_value(tmp_path: Path) -> None:
@@ -185,7 +189,7 @@ def test_agent_switch_state_reports_the_taken_over_value(tmp_path: Path) -> None
     settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 6 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 7 allow rules)"
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +828,10 @@ class _Completed:
     returncode = 0
 
 
-def _patch_wrap_claude_scaffolding(monkeypatch: pytest.MonkeyPatch, wrap_mod) -> dict:
-    captured: dict = {}
+def _patch_wrap_claude_scaffolding(
+    monkeypatch: pytest.MonkeyPatch, wrap_mod: ModuleType
+) -> dict[str, object]:
+    captured: dict[str, object] = {}
     monkeypatch.setattr(wrap_mod.shutil, "which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(wrap_mod, "_register_proxy_client", lambda _port: None)
     monkeypatch.setattr(wrap_mod, "_make_cleanup", lambda _holder, _port: lambda: None)

@@ -13,6 +13,8 @@ Tools:
                            delete, or rename
     Sql                 — Run a read-only query or view the schema for a
                            named database connection
+    SendMessage         — Message another Claude Code session on this
+                           machine, or list the ones that are reachable
 
 Usage:
     # As standalone server (stdio transport, called by AI coding tools)
@@ -86,6 +88,7 @@ STATS_TOOL_NAME = "headroom_stats"
 SEARCH_TOOL_NAME = "Search"
 EDIT_TOOL_NAME = "Edit"
 SQL_TOOL_NAME = "Sql"
+SEND_MESSAGE_TOOL_NAME = "SendMessage"
 
 logger = logging.getLogger("headroom.ccr.mcp")
 
@@ -374,9 +377,19 @@ class HeadroomMCPServer:
         proxy_url: str = DEFAULT_PROXY_URL,
         check_proxy: bool = True,
         keychain: Keychain | None = None,
+        sessions_dir: Path | None = None,
+        session_pid: int | None = None,
+        pid_alive: Callable[[int], bool] | None = None,
     ):
         self.proxy_url = proxy_url
         self.check_proxy = check_proxy
+        # SendMessage needs to know which Claude Code session launched this
+        # server (its parent process, over stdio) so it can skip itself in
+        # the registry and sign messages with its own name. Tests point
+        # ``sessions_dir`` at a scratch registry and stub ``pid_alive``.
+        self._sessions_dir = sessions_dir
+        self._session_pid = session_pid if session_pid is not None else os.getppid()
+        self._pid_alive = pid_alive
         self._http_client: httpx.AsyncClient | None = None  # type: ignore[assignment]
         self._stats = SessionStats()
         self._local_store: Any = None  # Lazy-initialized CompressionStore
@@ -493,7 +506,7 @@ class HeadroomMCPServer:
         elif entry_status.get("status") == "available":
             created_at = entry_status.get("created_at")
             ttl_seconds = entry_status.get("ttl_seconds")
-            if isinstance(created_at, (int, float)) and isinstance(ttl_seconds, (int, float)):
+            if isinstance(created_at, int | float) and isinstance(ttl_seconds, int | float):
                 age_seconds = time.time() - created_at
                 if age_seconds > ttl_seconds:
                     expired_entry_status = {
@@ -848,6 +861,45 @@ class HeadroomMCPServer:
                     "required": ["connection"],
                 },
             ),
+            Tool(
+                name=SEND_MESSAGE_TOOL_NAME,
+                description=(
+                    "Send a message to another Claude Code session running on this machine "
+                    "— use this when the built-in SendMessage tool is unavailable. "
+                    "action='list' shows the sessions you can reach, by name and status. "
+                    "action='send' (the default) delivers 'message' to 'to', a session name, "
+                    "id, or pid from that list. An idle session starts a turn on the message "
+                    "right away; a busy one reads it when its turn ends. Replies arrive here "
+                    "as normal incoming messages. Pass 'from' with your own session name so "
+                    "the recipient knows who sent it."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["send", "list"],
+                            "description": "'send' delivers a message (the default); 'list' shows who is reachable.",
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "The recipient: a session name, session id, or pid.",
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "The text to deliver. Say who you are and what you need.",
+                        },
+                        "from": {
+                            "type": "string",
+                            "description": (
+                                "Your own session name (as ListAgents shows it), so the message is "
+                                "signed and your session is left out of 'list'."
+                            ),
+                        },
+                    },
+                    "required": [],
+                },
+            ),
         ]
 
     def _setup_handlers(self) -> None:
@@ -868,6 +920,7 @@ class HeadroomMCPServer:
             SEARCH_TOOL_NAME: self._handle_search,
             EDIT_TOOL_NAME: self._handle_edit,
             SQL_TOOL_NAME: self._handle_sql,
+            SEND_MESSAGE_TOOL_NAME: self._handle_send_message,
         }
 
         @self.server.call_tool()
@@ -1161,6 +1214,24 @@ class HeadroomMCPServer:
             name = str(request.get("connection", ""))
             text = f"Refused: {connections.describe_unknown(name)}"
 
+        return [TextContent(type="text", text=text)]
+
+    async def _handle_send_message(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle the SendMessage tool call by running it against
+        code_tools.messaging, which reads Claude Code's session registry and
+        writes to the recipient's local socket. The socket write blocks for
+        a moment, so it runs off the event loop."""
+        from headroom.code_tools import messaging
+
+        kwargs: dict[str, Any] = {
+            "sessions_dir": self._sessions_dir,
+            "self_pid": self._session_pid,
+        }
+        if self._pid_alive is not None:
+            kwargs["pid_alive"] = self._pid_alive
+
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, lambda: messaging.send_message(arguments, **kwargs))
         return [TextContent(type="text", text=text)]
 
     async def _await_parent_death(self, interval: float) -> None:

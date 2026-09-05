@@ -80,6 +80,9 @@ CODE_AGENT_ALLOW_RULES: tuple[str, ...] = (
     "mcp__headroom__headroom_compress",
     "mcp__headroom__headroom_retrieve",
     "mcp__headroom__headroom_stats",
+    # Messaging another Claude Code session on this machine, for sessions
+    # (the Claude desktop app) where the built-in SendMessage is switched off.
+    "mcp__headroom__SendMessage",
     # No memory rule: for Claude Code, `memory_search`/`memory_save` are
     # injected straight into each request by the proxy (see
     # `headroom.proxy.memory_tool_adapter`), not registered as an MCP

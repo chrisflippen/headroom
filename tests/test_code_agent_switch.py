@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from click.testing import CliRunner
@@ -816,6 +817,80 @@ def test_code_agent_db_list_reports_configured_names(
 
 
 # ---------------------------------------------------------------------------
+# Click commands: `headroom code-agent roots add / remove / list`
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _roots_workspace_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Isolate the roots file from the filesystem's real workspace dir."""
+
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(workspace))
+    return workspace
+
+
+def test_code_agent_roots_add_then_list_round_trips(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
+) -> None:
+    from headroom.cli.main import main
+
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    added = tmp_path / "sibling"
+    added.mkdir()
+    monkeypatch.chdir(launch_dir)
+
+    add_result = runner.invoke(main, ["code-agent", "roots", "add", str(added)])
+
+    assert add_result.exit_code == 0, add_result.output
+    assert str(added.resolve()) in add_result.output
+
+    list_result = runner.invoke(main, ["code-agent", "roots", "list"])
+
+    assert list_result.exit_code == 0, list_result.output
+    assert str(launch_dir.resolve()) in list_result.output
+    assert "Added roots:" in list_result.output
+    assert str(added.resolve()) in list_result.output
+
+
+def test_code_agent_roots_add_rejects_a_missing_directory(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
+) -> None:
+    from headroom.cli.main import main
+
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+
+    result = runner.invoke(main, ["code-agent", "roots", "add", str(tmp_path / "nope")])
+
+    assert result.exit_code != 0
+    assert "not an existing directory" in str(result.output) + str(result.exception)
+
+
+def test_code_agent_roots_remove_drops_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _roots_workspace_dir: Path
+) -> None:
+    from headroom.cli.main import main
+
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    added = tmp_path / "sibling"
+    added.mkdir()
+    monkeypatch.chdir(launch_dir)
+    runner.invoke(main, ["code-agent", "roots", "add", str(added)])
+
+    remove_result = runner.invoke(main, ["code-agent", "roots", "remove", str(added)])
+
+    assert remove_result.exit_code == 0, remove_result.output
+    assert "Removed root" in remove_result.output
+
+    list_result = runner.invoke(main, ["code-agent", "roots", "list"])
+    assert "Added roots:" not in list_result.output
+
+
+# ---------------------------------------------------------------------------
 # wrap claude wiring: --agent is injected by default, --no-code-agent skips it
 # ---------------------------------------------------------------------------
 
@@ -824,7 +899,7 @@ class _Completed:
     returncode = 0
 
 
-def _patch_wrap_claude_scaffolding(monkeypatch: pytest.MonkeyPatch, wrap_mod) -> dict:
+def _patch_wrap_claude_scaffolding(monkeypatch: pytest.MonkeyPatch, wrap_mod: ModuleType) -> dict:
     captured: dict = {}
     monkeypatch.setattr(wrap_mod.shutil, "which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(wrap_mod, "_register_proxy_client", lambda _port: None)

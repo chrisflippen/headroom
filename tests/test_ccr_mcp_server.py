@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import subprocess
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +22,7 @@ from tests._mcp_stub import import_module_with_mcp_stub
 mcp_server = import_module_with_mcp_stub("headroom.ccr.mcp_server")
 
 
-def test_shared_stats_work_without_fcntl(monkeypatch, tmp_path) -> None:
+def test_shared_stats_work_without_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(mcp_server, "_HAS_FCNTL", False)
     monkeypatch.setattr(mcp_server, "fcntl", None)
     monkeypatch.setattr(mcp_server, "SHARED_STATS_DIR", tmp_path)
@@ -46,19 +49,19 @@ def test_shared_stats_work_without_fcntl(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture
-def fresh_store():
+def fresh_store() -> Iterator[None]:
     reset_compression_store()
     yield
     reset_compression_store()
 
 
-def test_mcp_uses_shared_singleton_store(fresh_store) -> None:
+def test_mcp_uses_shared_singleton_store(fresh_store: None) -> None:
     """MCP's store is the global singleton, not a private instance."""
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     assert server._get_local_store() is get_compression_store()
 
 
-def test_mcp_retrieves_proxy_stored_content(fresh_store) -> None:
+def test_mcp_retrieves_proxy_stored_content(fresh_store: None) -> None:
     """Content stored via the singleton (as the proxy does) is retrievable
     through MCP's local-store path. The HTTP fallback is disabled so this
     passes only via the shared store."""
@@ -72,7 +75,7 @@ def test_mcp_retrieves_proxy_stored_content(fresh_store) -> None:
     assert result["original_content"] == original
 
 
-def test_compress_savings_percent_tracks_token_counts(fresh_store) -> None:
+def test_compress_savings_percent_tracks_token_counts(fresh_store: None) -> None:
     """``savings_percent`` must be the *removed* percentage derived from the
     token counts — never the retained percentage. Regression for the inversion
     where ``(1 - compression_ratio)`` reported a no-op (0% saved) as 100%."""
@@ -96,7 +99,7 @@ def test_compress_savings_percent_tracks_token_counts(fresh_store) -> None:
         assert result["savings_percent"] > 0.0
 
 
-def test_mcp_compress_surfaces_unreachable_proxy(fresh_store) -> None:
+def test_mcp_compress_surfaces_unreachable_proxy(fresh_store: None) -> None:
     server = mcp_server.HeadroomMCPServer(
         proxy_url="http://127.0.0.1:9",
         check_proxy=True,
@@ -168,7 +171,7 @@ def test_mcp_proxy_probe_preserves_shared_proxy_client(monkeypatch: pytest.Monke
     assert server._http_client is shared_client
 
 
-def test_mcp_local_mode_still_works_without_proxy_checking(fresh_store) -> None:
+def test_mcp_local_mode_still_works_without_proxy_checking(fresh_store: None) -> None:
     server = mcp_server.HeadroomMCPServer(
         proxy_url="http://127.0.0.1:9",
         check_proxy=False,
@@ -181,7 +184,7 @@ def test_mcp_local_mode_still_works_without_proxy_checking(fresh_store) -> None:
     assert "warning" not in payload or "unreachable" not in payload["warning"].lower()
 
 
-def test_mcp_retrieve_returns_full_content(fresh_store) -> None:
+def test_mcp_retrieve_returns_full_content(fresh_store: None) -> None:
     """Retrieval is by hash: a stored, unexpired entry always returns its full
     original content (never empty, never a spurious "not found")."""
     original = "the the the the the the the the the the\n" * 5
@@ -196,8 +199,8 @@ def test_mcp_retrieve_returns_full_content(fresh_store) -> None:
 
 
 def test_mcp_retrieve_expired_hash_returns_terminal_guidance(
-    monkeypatch,
-    fresh_store,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_store: None,
 ) -> None:
     """An expired local hash should say it expired and tell the agent to stop retrying."""
     current_time = [1000.0]
@@ -224,8 +227,8 @@ def test_mcp_retrieve_expired_hash_returns_terminal_guidance(
 
 
 def test_mcp_retrieve_hash_expiring_during_lookup_returns_terminal_guidance(
-    monkeypatch,
-    fresh_store,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_store: None,
 ) -> None:
     phase = "store"
     status_seen = False
@@ -245,7 +248,7 @@ def test_mcp_retrieve_hash_expiring_during_lookup_returns_terminal_guidance(
     original_get_entry_status = store.get_entry_status
     original_retrieve = store.retrieve
 
-    def get_entry_status_then_expire(*args, **kwargs):
+    def get_entry_status_then_expire(*args: Any, **kwargs: Any) -> Any:
         nonlocal status_seen
         result = original_get_entry_status(*args, **kwargs)
         status_seen = True
@@ -265,8 +268,8 @@ def test_mcp_retrieve_hash_expiring_during_lookup_returns_terminal_guidance(
 
 
 def test_mcp_retrieve_missing_local_hash_can_still_hit_proxy(
-    monkeypatch,
-    fresh_store,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_store: None,
 ) -> None:
     monkeypatch.setattr(mcp_server, "HTTPX_AVAILABLE", True)
     server = mcp_server.HeadroomMCPServer(check_proxy=True)
@@ -284,8 +287,8 @@ def test_mcp_retrieve_missing_local_hash_can_still_hit_proxy(
 
 
 def test_mcp_retrieve_expired_local_hash_can_still_hit_proxy(
-    monkeypatch,
-    fresh_store,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_store: None,
 ) -> None:
     current_time = [1000.0]
 
@@ -314,7 +317,7 @@ def test_mcp_retrieve_expired_local_hash_can_still_hit_proxy(
     assert result["original_content"] == "from proxy"
 
 
-def test_mcp_retrieve_missing_hash_still_errors(fresh_store) -> None:
+def test_mcp_retrieve_missing_hash_still_errors(fresh_store: None) -> None:
     """A never-stored hash must stay on the generic missing path, not expired guidance."""
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     result = asyncio.run(server._retrieve_content("nonexistent_hash"))
@@ -421,7 +424,7 @@ def test_handle_stats_shows_zero_lifetime_totals_when_present() -> None:
 # forces shutdown. Refs headroomlabs-ai/headroom#2185 (secondary), #1761.
 
 
-def test_parent_death_watchdog_fires_when_reparented(monkeypatch) -> None:
+def test_parent_death_watchdog_fires_when_reparented(monkeypatch: pytest.MonkeyPatch) -> None:
     """When ppid changes (client died), the watchdog resolves promptly."""
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     calls = {"n": 0}
@@ -438,7 +441,9 @@ def test_parent_death_watchdog_fires_when_reparented(monkeypatch) -> None:
     asyncio.run(run())  # returns => detected reparent; TimeoutError would fail
 
 
-def test_parent_death_watchdog_stays_quiet_with_live_parent(monkeypatch) -> None:
+def test_parent_death_watchdog_stays_quiet_with_live_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A stable ppid must never trip the watchdog."""
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     monkeypatch.setattr(mcp_server.os, "getppid", lambda: 500)
@@ -450,18 +455,18 @@ def test_parent_death_watchdog_stays_quiet_with_live_parent(monkeypatch) -> None
     asyncio.run(run())
 
 
-def test_run_stdio_reaps_process_on_parent_death(monkeypatch) -> None:
+def test_run_stdio_reaps_process_on_parent_death(monkeypatch: pytest.MonkeyPatch) -> None:
     """On reparent, run_stdio cleans up and calls os._exit(0) even though the
     (stubbed) server.run never returns — the orphan-reaper path."""
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
 
     @contextlib.asynccontextmanager
-    async def fake_stdio_server():
+    async def fake_stdio_server() -> AsyncIterator[tuple[object, object]]:
         yield (object(), object())
 
     monkeypatch.setattr(mcp_server, "stdio_server", fake_stdio_server)
 
-    async def never_returns(*_args, **_kwargs) -> None:
+    async def never_returns(*_args: Any, **_kwargs: Any) -> None:
         await asyncio.sleep(3600)  # emulate the wedged SDK reader
 
     # DummyServer (MCP SDK stub) has no `.run`; raising=False lets us add it.
@@ -598,3 +603,44 @@ def test_call_tool_sql_query_reaches_the_resolver_and_reports_unknown_names(
     )
     unknown_text = unknown_response[0].kwargs["text"]
     assert connections.describe_unknown("nope") in unknown_text
+
+
+# --- Search reaches sibling git worktrees through the MCP handler path ------
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def test_call_tool_search_reads_a_file_in_a_sibling_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``call_tool`` (the MCP dispatch entry point) resolves a Search read
+    against a file in a sibling git worktree of the launch directory, not
+    just the launch directory itself, and still returns a stamp."""
+
+    launch_dir = tmp_path / "main"
+    launch_dir.mkdir()
+    _git("init", "-b", "main", cwd=launch_dir)
+    _git("config", "user.email", "test@example.com", cwd=launch_dir)
+    _git("config", "user.name", "Test", cwd=launch_dir)
+    (launch_dir / "README.md").write_text("hello")
+    _git("add", "README.md", cwd=launch_dir)
+    _git("commit", "-m", "initial", cwd=launch_dir)
+
+    worktree_dir = tmp_path / "feature-worktree"
+    _git("worktree", "add", "-b", "feature", str(worktree_dir), cwd=launch_dir)
+    (worktree_dir / "sibling.py").write_text("print('from sibling worktree')\n")
+
+    monkeypatch.chdir(launch_dir)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    response = asyncio.run(
+        server._call_tool_handler(
+            "Search", {"action": "read", "path": str(worktree_dir / "sibling.py")}
+        )
+    )
+
+    text = response[0].kwargs["text"]
+    assert "print('from sibling worktree')" in text
+    assert "stamp=" in text

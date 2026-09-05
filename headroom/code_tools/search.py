@@ -34,8 +34,10 @@ from typing import Any
 from headroom._subprocess import run as _run_subprocess
 from headroom.code_tools.files import (
     PathOutsideRootError,
+    display_path,
     file_stamp,
     resolve_path,
+    root_containing,
 )
 from headroom.code_tools.files import line_count as _line_count
 from headroom.code_tools.files import read_file_text as _read_file_text
@@ -114,7 +116,7 @@ def _handle_read(request: dict[str, Any], root: Path) -> str:
     except OSError as exc:
         return f"error: cannot read file: {exc}"
 
-    rel = path.relative_to(root.resolve()).as_posix()
+    rel = display_path(path, root)
     stamp = file_stamp(content)
 
     start = request.get("start")
@@ -416,6 +418,7 @@ def _handle_grep(request: dict[str, Any], root: Path) -> str:
 
     raw_path = request.get("path")
     search_target = "."
+    effective_root = root
     if raw_path:
         try:
             resolved = resolve_path(str(raw_path), root)
@@ -423,7 +426,8 @@ def _handle_grep(request: dict[str, Any], root: Path) -> str:
             return f"error: {exc}"
         if not resolved.exists():
             return f"error: path not found: {raw_path}"
-        search_target = resolved.relative_to(root.resolve()).as_posix() or "."
+        effective_root = root_containing(resolved, root)
+        search_target = resolved.relative_to(effective_root).as_posix() or "."
 
     glob = request.get("glob")
     glob = str(glob) if glob else None
@@ -438,7 +442,7 @@ def _handle_grep(request: dict[str, Any], root: Path) -> str:
     if err:
         return err
 
-    matches, error = _grep_matches(root, pattern, search_target, glob, context)
+    matches, error = _grep_matches(effective_root, pattern, search_target, glob, context)
     if error is not None:
         return error
     return _render_grep_matches(matches, limit)
@@ -619,7 +623,7 @@ def _handle_symbols(request: dict[str, Any], root: Path) -> str:
     except OSError as exc:
         return f"error: could not read file: {exc}"
 
-    rel = resolved.relative_to(root.resolve()).as_posix()
+    rel = display_path(resolved, root)
     language = _language_for_path(resolved, content)
     if language is CodeLanguage.UNKNOWN:
         return (
@@ -690,7 +694,7 @@ def _handle_importers(request: dict[str, Any], root: Path) -> str:
     if not resolved.exists():
         return f"error: file not found: {raw_path}"
 
-    target_rel = resolved.relative_to(root.resolve()).as_posix()
+    target_rel = display_path(resolved, root)
     stem, dotted = _module_forms(target_rel)
     pattern = _importers_pattern(stem, dotted)
 

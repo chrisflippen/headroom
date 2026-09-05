@@ -44,6 +44,7 @@ from headroom.code_tools.connections import (
     remove_connection,
 )
 from headroom.code_tools.post_edit_check import hook_main, real_runner
+from headroom.code_tools.roots import add_root, file_roots, git_worktrees, remove_root
 from headroom.providers.claude.vscode import claude_user_settings_path
 
 from .main import main
@@ -655,6 +656,63 @@ def code_agent_db_list() -> None:
         return
     for name in names:
         click.echo(f"  {name}")
+
+
+# ---------------------------------------------------------------------------
+# 10. Click commands: `headroom code-agent roots add / remove / list`.
+# ---------------------------------------------------------------------------
+
+
+@code_agent_group.group("roots")
+def code_agent_roots_group() -> None:
+    """Manage extra directories Search and Edit may reach beyond the launch
+    directory: the current directory, its sibling git worktrees, and
+    whatever is added here."""
+
+
+@code_agent_roots_group.command("add")
+@click.argument("directory")
+def code_agent_roots_add(directory: str) -> None:
+    """Add DIRECTORY as an extra root for the current launch directory."""
+    target = Path(directory).expanduser()
+    try:
+        resolved = add_root(Path.cwd(), target)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"  Added root: {resolved}")
+
+
+@code_agent_roots_group.command("remove")
+@click.argument("directory")
+def code_agent_roots_remove(directory: str) -> None:
+    """Remove DIRECTORY from the current launch directory's added roots."""
+    target = Path(directory).expanduser()
+    resolved = target.resolve()
+    if remove_root(Path.cwd(), target):
+        click.echo(f"  Removed root: {resolved}")
+    else:
+        click.echo(f"  Not a configured root: {resolved}")
+
+
+@code_agent_roots_group.command("list")
+def code_agent_roots_list() -> None:
+    """List the effective roots for the current launch directory: the
+    launch directory itself, its sibling git worktrees, and any added
+    roots."""
+    launch_dir = Path.cwd()
+    click.echo(f"  Launch directory: {launch_dir.resolve()}")
+
+    worktrees = [w for w in git_worktrees(launch_dir) if w.resolve() != launch_dir.resolve()]
+    if worktrees:
+        click.echo("  Sibling worktrees:")
+        for worktree in worktrees:
+            click.echo(f"    {worktree}")
+
+    extra = file_roots(launch_dir)
+    if extra:
+        click.echo("  Added roots:")
+        for one_root in extra:
+            click.echo(f"    {one_root}")
 
 
 def _skills_ensure_runner(argv: list[str]) -> None:

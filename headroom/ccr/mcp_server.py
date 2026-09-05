@@ -59,26 +59,34 @@ try:
 except ImportError:
     _HAS_FCNTL = False
 
-# Try to import MCP SDK
+# Try to import MCP SDK. ``stdio_server`` is typed ``Any`` up front, the same
+# way ``fcntl`` is above, so a caller that only ever runs it behind
+# ``MCP_AVAILABLE`` isn't blocked by the type checker treating the
+# import-failed fallback as `None`.
+stdio_server: Any = None
 try:
     from mcp.server import Server
-    from mcp.server.stdio import stdio_server
+    from mcp.server.stdio import stdio_server as _stdio_server
     from mcp.types import TextContent, Tool
 
+    stdio_server = _stdio_server
     MCP_AVAILABLE = True
 except ImportError:
     MCP_AVAILABLE = False
     Server = None  # type: ignore[assignment,misc]
-    stdio_server = None  # type: ignore[assignment]
+    stdio_server = None
 
-# Try to import httpx for proxy communication
+# Try to import httpx for proxy communication. Typed ``Any`` up front for the
+# same reason as ``stdio_server`` above -- every real use is already guarded
+# by ``HTTPX_AVAILABLE`` or a prior successful call.
+httpx: Any = None
 try:
     import httpx
 
     HTTPX_AVAILABLE = True
 except ImportError:
     HTTPX_AVAILABLE = False
-    httpx = None  # type: ignore[assignment]
+    httpx = None
 
 CCR_TOOL_NAME = "headroom_retrieve"
 COMPRESS_TOOL_NAME = "headroom_compress"
@@ -548,6 +556,11 @@ class HeadroomMCPServer:
         hash_key: str,
     ) -> dict[str, Any]:
         """Retrieve full content by hash via proxy's HTTP endpoint."""
+        # Only ever called under `self.check_proxy and HTTPX_AVAILABLE` (see
+        # the caller in `_get_retrieve_content`), so `httpx` is never `None`
+        # here -- the assert makes that invariant explicit for the type
+        # checker instead of leaving it implicit in the caller.
+        assert httpx is not None
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=15.0)
 
@@ -567,6 +580,7 @@ class HeadroomMCPServer:
         """Return explicit proxy-unreachable state when the configured proxy is down."""
         if not self.check_proxy or not HTTPX_AVAILABLE:
             return None
+        assert httpx is not None
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(f"{self.proxy_url}/livez")
@@ -700,7 +714,10 @@ class HeadroomMCPServer:
                             "description": (
                                 "Path to a file or folder, relative to the project root or "
                                 "absolute. Required for read, symbols, and importers; "
-                                "optional for grep, where it limits the search to that path."
+                                "optional for grep, where it limits the search to that path. "
+                                "May be inside the launch directory, any sibling git worktree "
+                                "of it, or a directory added with `headroom code-agent roots "
+                                "add`."
                             ),
                         },
                         "pattern": {
@@ -1075,6 +1092,9 @@ class HeadroomMCPServer:
 
     async def _fetch_full_proxy_stats(self) -> dict[str, Any] | None:
         """Fetch full stats from the proxy (includes summary)."""
+        # Only ever called under `self.check_proxy and HTTPX_AVAILABLE` (see
+        # the caller in `_handle_stats`), so `httpx` is never `None` here.
+        assert httpx is not None
         try:
             if self._http_client is None:
                 self._http_client = httpx.AsyncClient(timeout=15.0)
@@ -1194,6 +1214,10 @@ class HeadroomMCPServer:
         leaves the SDK's stdin reader wedged and ``server.run`` never returns; the
         watchdog forces shutdown once we are reparented.
         """
+        # `__init__` already raised `ImportError` if `MCP_AVAILABLE` were
+        # `False`, so `stdio_server` is never `None` by the time an instance
+        # exists to call this.
+        assert stdio_server is not None
         async with stdio_server() as (read_stream, write_stream):
             logger.info(f"Headroom MCP Server starting (proxy: {self.proxy_url})")
             serve_task = asyncio.create_task(

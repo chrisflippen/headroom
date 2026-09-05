@@ -8,13 +8,21 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import json
 import tempfile
+from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
 
 from tests._skip_helpers import external_model_skip_reason
+
+if TYPE_CHECKING:
+    from pluggy import Result
+
+    from headroom.config import HeadroomConfig, RequestMetrics, SmartCrusherConfig
+    from headroom.providers.openai import OpenAIProvider, OpenAITokenCounter
 
 
 # A live `headroom` dev session exports HEADROOM_* into the shell (and the
@@ -39,11 +47,46 @@ def _skip_proxy_dependency_gate_unless_exercised(
 
 
 @pytest.fixture(autouse=True)
-def _scrub_developer_headroom_env(monkeypatch):
+def _scrub_developer_headroom_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("HEADROOM_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+
+
+# The scrub above deletes HEADROOM_WORKSPACE_DIR / HEADROOM_CONFIG_DIR, which
+# means every helper in `headroom.paths` (workspace_dir(), config_dir(),
+# proxy_log_path(), savings_events_path(), memory_db_path(), ...) falls back to
+# deriving from `Path.home()` -- and so does every one of the ~56 call sites
+# elsewhere in the codebase (headroom/install/paths.py, cli/wrap.py,
+# install/supervisors.py, binaries.py, learn/writer.py, ...) that call
+# `Path.home()` directly instead of going through `headroom.paths`. On a
+# developer machine that real home is the actual `~/.headroom` the live
+# dashboard reads. Observed a full local run appending hundreds of fake proxy
+# start-up lines to `~/.headroom/logs/proxy.log` and fake savings rows to
+# `~/.headroom/savings_events.jsonl` / `proxy_savings.json`.
+#
+# Redirect HOME (and its Windows equivalent) plus both canonical roots at
+# fresh, already-created sub-directories of `tmp_path` so every one of those
+# resolution paths -- the `headroom.paths` helpers *and* the raw
+# `Path.home()` call sites -- lands somewhere disposable. Depends on the
+# scrub fixture (declared as a fixture arg, not just declaration order) so
+# this always runs after HEADROOM_* is cleared and gets the last word.
+@pytest.fixture(autouse=True)
+def _isolate_headroom_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _scrub_developer_headroom_env: None
+) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_workspace = tmp_path / "fake-workspace"
+    fake_config = tmp_path / "fake-config"
+    for directory in (fake_home, fake_workspace, fake_config):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    # `Path.home()` reads `USERPROFILE` first on Windows, then `HOME`.
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(fake_workspace))
+    monkeypatch.setenv("HEADROOM_CONFIG_DIR", str(fake_config))
 
 
 # The scrub above deletes every HEADROOM_* var — which includes HEADROOM_BEACON,
@@ -57,21 +100,28 @@ def _scrub_developer_headroom_env(monkeypatch):
 # relying on declaration order. A test that wants the beacon on just sets the
 # var itself — monkeypatch inside the test wins over this.
 @pytest.fixture(autouse=True)
-def _disable_telemetry_beacon(monkeypatch, _scrub_developer_headroom_env):
+def _disable_telemetry_beacon(
+    monkeypatch: pytest.MonkeyPatch, _scrub_developer_headroom_env: None
+) -> None:
     monkeypatch.setenv("HEADROOM_BEACON", "off")
 
 
 # The MCP install ledger defaults to ``~/.headroom/mcp_installs.json``, so any
-# test that registers a server (directly or through `wrap`) writes into the
-# developer's REAL ledger — observed adding a live `claude/serena` entry during a
-# local run. Since the scrub above deletes HEADROOM_WORKSPACE_DIR, the default is
-# always the real home. Redirect the ledger per-test instead: every writer
-# (`record_install` / `clear_install` / `headroom_installed_matching`) resolves it
-# through this module-global, so one patch covers them all. Patched here rather
-# than pointing workspace_dir() at a tmp path, which would break the tests that
-# assert the default workspace layout.
+# test that registers a server (directly or through `wrap`) writes into
+# whatever workspace_dir() currently resolves to — observed adding a live
+# `claude/serena` entry to the developer's REAL ledger during a local run
+# before `_isolate_headroom_home` above existed. That fixture now points
+# workspace_dir() at a tmp path for every test, but a test can still legally
+# monkeypatch HEADROOM_WORKSPACE_DIR/HOME back off for its own purposes, so
+# redirect the ledger independently rather than relying on that. Every writer
+# (`record_install` / `clear_install` / `headroom_installed_matching`) resolves
+# it through this module-global, so one patch covers them all. Patched here
+# rather than pointing workspace_dir() at a tmp path, which would break the
+# tests that assert the default workspace layout.
 @pytest.fixture(autouse=True)
-def _isolate_mcp_ledger(monkeypatch, tmp_path_factory):
+def _isolate_mcp_ledger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     # Same guard as _reset_copilot_routing_flag below: the macos/windows-native-
     # wrapper CI jobs install only pytest and drive the installer shell scripts
     # via subprocess, so headroom isn't importable and there is no ledger to
@@ -91,7 +141,7 @@ def _isolate_mcp_ledger(monkeypatch, tmp_path_factory):
 # set and mislabel a later test's request outcome as "copilot". Reset it around
 # every test so build-time side effects can't leak between tests.
 @pytest.fixture(autouse=True)
-def _reset_copilot_routing_flag():
+def _reset_copilot_routing_flag() -> Generator[None, None, None]:
     # The macos/windows-native-wrapper CI jobs run the installer tests with only
     # pytest installed (no headroom): they drive the installer shell scripts via
     # subprocess, so headroom isn't importable and there's no routing flag to
@@ -118,7 +168,7 @@ def _reset_copilot_routing_flag():
 # Clear before AND after so a test's own within-test resolutions never leak
 # in from, or leak out to, a neighboring test either.
 @pytest.fixture(autouse=True)
-def _reset_litellm_model_resolution_cache():
+def _reset_litellm_model_resolution_cache() -> Generator[None, None, None]:
     try:
         from headroom.proxy.savings_tracker import _resolve_litellm_model
     except ModuleNotFoundError:
@@ -136,7 +186,7 @@ def _reset_litellm_model_resolution_cache():
 
 
 @pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_call(item):
+def pytest_runtest_call(item: pytest.Item) -> Generator[None, "Result[None]", None]:
     """Wrap test execution to skip transient or offline external model failures.
 
     This handles model-loading failures that occur when:
@@ -155,7 +205,7 @@ def pytest_runtest_call(item):
 
 
 @pytest.fixture(autouse=True)
-def _null_binary_pins():
+def _null_binary_pins() -> Generator[None, None, None]:
     """Null the tools.json SHA-256 pins during tests.
 
     Installer tests fetch small mock archives, whose digests can't match the
@@ -187,7 +237,7 @@ def _null_binary_pins():
 
 
 @pytest.fixture(autouse=True)
-def _reset_headroom_logger_propagation():
+def _reset_headroom_logger_propagation() -> Generator[None, None, None]:
     """Keep `headroom.*` log records flowing to pytest's caplog handler.
 
     Two sources disable propagation on the headroom logger tree and never
@@ -229,7 +279,7 @@ def _reset_headroom_logger_propagation():
 
 # Sample messages fixtures
 @pytest.fixture
-def sample_messages():
+def sample_messages() -> list[dict[str, Any]]:
     """Basic conversation messages."""
     return [
         {"role": "system", "content": "You are a helpful assistant."},
@@ -239,7 +289,7 @@ def sample_messages():
 
 
 @pytest.fixture
-def sample_messages_with_tools():
+def sample_messages_with_tools() -> list[dict[str, Any]]:
     """Conversation with tool calls and responses."""
     return [
         {"role": "system", "content": "You are a helpful assistant with tools."},
@@ -265,7 +315,7 @@ def sample_messages_with_tools():
 
 
 @pytest.fixture
-def sample_tool_output_large():
+def sample_tool_output_large() -> str:
     """Large tool output for compression testing (100 items)."""
     return json.dumps(
         [
@@ -281,7 +331,7 @@ def sample_tool_output_large():
 
 
 @pytest.fixture
-def sample_tool_output_with_errors():
+def sample_tool_output_with_errors() -> str:
     """Tool output containing error items."""
     items = [{"id": i, "status": "success"} for i in range(20)]
     items[5] = {"id": 5, "status": "error", "message": "Connection refused"}
@@ -290,13 +340,13 @@ def sample_tool_output_with_errors():
 
 
 @pytest.fixture
-def sample_system_prompt_with_date():
+def sample_system_prompt_with_date() -> str:
     """System prompt containing dynamic date."""
     return "You are a helpful assistant. Current date: 2025-01-06. Help the user with their tasks."
 
 
 @pytest.fixture
-def sample_anthropic_messages():
+def sample_anthropic_messages() -> list[dict[str, Any]]:
     """Anthropic-style messages with content blocks."""
     return [
         {
@@ -314,7 +364,7 @@ def sample_anthropic_messages():
 
 # Mock client fixtures
 @pytest.fixture
-def mock_openai_response():
+def mock_openai_response() -> Mock:
     """Mock OpenAI API response."""
     mock = Mock()
     mock.id = "chatcmpl-123"
@@ -332,7 +382,7 @@ def mock_openai_response():
 
 
 @pytest.fixture
-def mock_openai_client(mock_openai_response):
+def mock_openai_client(mock_openai_response: Mock) -> Mock:
     """Mock OpenAI client."""
     client = Mock()
     client.chat = Mock()
@@ -343,7 +393,7 @@ def mock_openai_client(mock_openai_response):
 
 # Storage fixtures
 @pytest.fixture
-def temp_sqlite_db():
+def temp_sqlite_db() -> Generator[str, None, None]:
     """Temporary SQLite database path."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         yield f.name
@@ -351,7 +401,7 @@ def temp_sqlite_db():
 
 
 @pytest.fixture
-def temp_jsonl_file():
+def temp_jsonl_file() -> Generator[str, None, None]:
     """Temporary JSONL file path."""
     with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
         yield f.name
@@ -360,7 +410,7 @@ def temp_jsonl_file():
 
 # Provider fixtures
 @pytest.fixture
-def openai_provider():
+def openai_provider() -> "OpenAIProvider":
     """OpenAI provider instance."""
     from headroom.providers.openai import OpenAIProvider
 
@@ -368,7 +418,7 @@ def openai_provider():
 
 
 @pytest.fixture
-def openai_tokenizer():
+def openai_tokenizer() -> "OpenAITokenCounter":
     """OpenAI token counter for gpt-4o."""
     from headroom.providers.openai import OpenAITokenCounter
 
@@ -377,7 +427,7 @@ def openai_tokenizer():
 
 # Config fixtures
 @pytest.fixture
-def default_config():
+def default_config() -> "HeadroomConfig":
     """Default HeadroomConfig."""
     from headroom.config import HeadroomConfig
 
@@ -385,7 +435,7 @@ def default_config():
 
 
 @pytest.fixture
-def smart_crusher_config():
+def smart_crusher_config() -> "SmartCrusherConfig":
     """SmartCrusher config for testing."""
     from headroom.config import SmartCrusherConfig
 
@@ -399,7 +449,7 @@ def smart_crusher_config():
 
 # Helper for creating RequestMetrics
 @pytest.fixture
-def sample_request_metrics():
+def sample_request_metrics() -> "RequestMetrics":
     """Sample RequestMetrics for storage tests."""
     from headroom.config import RequestMetrics
 

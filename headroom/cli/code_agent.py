@@ -34,7 +34,7 @@ import click
 import headroom
 from headroom import fsutil
 from headroom._subprocess import run
-from headroom.code_tools import brief, skills_ensure
+from headroom.code_tools import brief, plugin_registry, skills_ensure
 from headroom.code_tools.connections import (
     Keychain,
     MacOSKeychain,
@@ -294,12 +294,12 @@ def install_plugin(runner: Runner, source: str) -> None:
 def installed_plugins_path(settings_path: Path) -> Path:
     """Where Claude Code records installed plugins, next to `settings_path`.
 
-    Claude Code keeps `plugins/installed_plugins.json` as a sibling of
-    `settings.json` under the same config directory, so this only needs
-    the settings path the caller already has -- no separate env lookup.
+    A thin wrapper over `plugin_registry.installed_plugins_path` -- kept as
+    its own name here so callers and tests in this module don't need to know
+    the JSON reading moved to a shared helper.
     """
 
-    return settings_path.parent / "plugins" / "installed_plugins.json"
+    return plugin_registry.installed_plugins_path(settings_path)
 
 
 def plugin_installed(
@@ -308,24 +308,12 @@ def plugin_installed(
 ) -> bool:
     """True when Claude Code's own registry lists `plugin_key` as installed.
 
-    A missing file, unreadable JSON, or a present key with an empty list
-    (uninstalled but not yet pruned from the file) all count as not
-    installed.
+    A thin wrapper over `plugin_registry.plugin_installed`, which
+    `headroom.code_tools.skills_ensure` also calls for its own plugins --
+    the JSON reading lives there once instead of in both places.
     """
 
-    if not installed_plugins_path.exists():
-        return False
-    try:
-        payload = json.loads(installed_plugins_path.read_text())
-    except (OSError, ValueError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    plugins = payload.get("plugins")
-    if not isinstance(plugins, dict):
-        return False
-    entry = plugins.get(plugin_key)
-    return isinstance(entry, list) and len(entry) > 0
+    return plugin_registry.plugin_installed(installed_plugins_path, plugin_key)
 
 
 def ensure_plugin_installed(
@@ -583,6 +571,13 @@ def code_agent_skills_ensure() -> None:
     )
     for failure in result.failures:
         click.echo(f"  skills-ensure: {failure}", err=True)
+    if result.failures and result.skipped_plugins:
+        count = len(result.skipped_plugins)
+        plural = "" if count == 1 else "s"
+        click.echo(
+            f"  skills-ensure: {count} configured plugin{plural} not installed, skipped",
+            err=True,
+        )
 
 
 @code_agent_group.command("brief")

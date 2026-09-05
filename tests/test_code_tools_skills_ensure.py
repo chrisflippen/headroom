@@ -35,8 +35,24 @@ def _write_lock(lock_path: Path, skill_names: list[str]) -> None:
     lock_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_registry(home: Path, plugin_keys: list[str]) -> None:
+    """Mark `plugin_keys` as installed in Claude Code's own registry.
+
+    Writes `<home>/.claude/plugins/installed_plugins.json`, the file
+    `skills_ensure` reads through `claude_user_settings_path` -- which the
+    `lock_file` fixture already points at `home` by setting `$HOME`.
+    """
+    registry_path = home / ".claude" / "plugins" / "installed_plugins.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"plugins": {key: [{"scope": "user"}] for key in plugin_keys}}
+    registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_first_run_updates_skills_and_each_plugin(lock_file: Path, tmp_path: Path) -> None:
     _write_lock(lock_file, ["code-review"])
+    _write_registry(
+        tmp_path, ["headroom-code-agent@headroom-marketplace", "headroom@headroom-marketplace"]
+    )
     calls: list[list[str]] = []
     state_path = tmp_path / "state" / "skills_ensure.json"
 
@@ -51,6 +67,7 @@ def test_first_run_updates_skills_and_each_plugin(lock_file: Path, tmp_path: Pat
     assert result.ran is True
     assert result.skipped_reason is None
     assert result.failures == []
+    assert result.skipped_plugins == []
     assert result.commands == [
         ["npx", "skills", "update", "-g", "-y"],
         [
@@ -137,6 +154,9 @@ def test_multiple_missing_skills_are_batched_into_one_add_command(
 
 def test_plugin_updates_run_concurrently(lock_file: Path, tmp_path: Path) -> None:
     _write_lock(lock_file, ["code-review"])
+    _write_registry(
+        tmp_path, ["plugin-a@marketplace", "plugin-b@marketplace", "plugin-c@marketplace"]
+    )
     state_path = tmp_path / "state" / "skills_ensure.json"
 
     def slow_runner(argv: list[str]) -> None:
@@ -161,6 +181,7 @@ def test_plugin_command_order_is_preserved_despite_concurrent_completion(
     lock_file: Path, tmp_path: Path
 ) -> None:
     _write_lock(lock_file, ["code-review"])
+    _write_registry(tmp_path, ["first@marketplace", "second@marketplace", "third@marketplace"])
     state_path = tmp_path / "state" / "skills_ensure.json"
 
     def variable_speed_runner(argv: list[str]) -> None:
@@ -207,6 +228,7 @@ def test_runner_failure_is_recorded_but_other_commands_still_run(
     lock_file: Path, tmp_path: Path
 ) -> None:
     _write_lock(lock_file, ["code-review"])
+    _write_registry(tmp_path, ["headroom@headroom-marketplace"])
     calls: list[list[str]] = []
 
     def failing_runner(argv: list[str]) -> None:
@@ -251,6 +273,98 @@ def test_corrupt_state_file_is_treated_as_never_ran(lock_file: Path, tmp_path: P
 
     assert result.ran is True
     assert result.skipped_reason is None
+    assert calls == [["npx", "skills", "update", "-g", "-y"]]
+
+
+# ---------------------------------------------------------------------------
+# Plugin install check: an uninstalled plugin is skipped, not failed.
+# ---------------------------------------------------------------------------
+
+
+def test_uninstalled_plugin_yields_no_update_command_and_no_failure(
+    lock_file: Path, tmp_path: Path
+) -> None:
+    _write_lock(lock_file, ["code-review"])  # no registry file written at all
+    calls: list[list[str]] = []
+    state_path = tmp_path / "state" / "skills_ensure.json"
+
+    result = skills_ensure.ensure(
+        [{"name": "code-review", "source": "mattpocock/skills@code-review"}],
+        ["not-installed@some-marketplace"],
+        now=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+        runner=calls.append,
+        state_path=state_path,
+    )
+
+    assert result.commands == [["npx", "skills", "update", "-g", "-y"]]
+    assert result.failures == []
+    assert result.skipped_plugins == ["not-installed@some-marketplace"]
+    assert calls == [["npx", "skills", "update", "-g", "-y"]]
+
+
+def test_installed_plugin_still_updates(lock_file: Path, tmp_path: Path) -> None:
+    _write_lock(lock_file, ["code-review"])
+    _write_registry(tmp_path, ["installed@some-marketplace"])
+    calls: list[list[str]] = []
+    state_path = tmp_path / "state" / "skills_ensure.json"
+
+    result = skills_ensure.ensure(
+        [{"name": "code-review", "source": "mattpocock/skills@code-review"}],
+        ["installed@some-marketplace"],
+        now=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+        runner=calls.append,
+        state_path=state_path,
+    )
+
+    assert result.commands == [
+        ["npx", "skills", "update", "-g", "-y"],
+        ["claude", "plugin", "update", "installed@some-marketplace", "--scope", "user", "-y"],
+    ]
+    assert result.skipped_plugins == []
+
+
+def test_mix_of_installed_and_uninstalled_plugins_splits_correctly(
+    lock_file: Path, tmp_path: Path
+) -> None:
+    _write_lock(lock_file, ["code-review"])
+    _write_registry(tmp_path, ["installed@some-marketplace"])
+    calls: list[list[str]] = []
+    state_path = tmp_path / "state" / "skills_ensure.json"
+
+    result = skills_ensure.ensure(
+        [{"name": "code-review", "source": "mattpocock/skills@code-review"}],
+        ["installed@some-marketplace", "not-installed@some-marketplace"],
+        now=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+        runner=calls.append,
+        state_path=state_path,
+    )
+
+    plugin_commands = [cmd for cmd in result.commands if cmd[:2] == ["claude", "plugin"]]
+    assert plugin_commands == [
+        ["claude", "plugin", "update", "installed@some-marketplace", "--scope", "user", "-y"],
+    ]
+    assert result.skipped_plugins == ["not-installed@some-marketplace"]
+    assert result.failures == []
+
+
+def test_corrupt_registry_file_counts_as_nothing_installed(lock_file: Path, tmp_path: Path) -> None:
+    _write_lock(lock_file, ["code-review"])
+    registry_path = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text("{not valid json", encoding="utf-8")
+    calls: list[list[str]] = []
+    state_path = tmp_path / "state" / "skills_ensure.json"
+
+    result = skills_ensure.ensure(
+        [{"name": "code-review", "source": "mattpocock/skills@code-review"}],
+        ["some-plugin@some-marketplace"],
+        now=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+        runner=calls.append,
+        state_path=state_path,
+    )
+
+    assert result.skipped_plugins == ["some-plugin@some-marketplace"]
+    assert result.failures == []
     assert calls == [["npx", "skills", "update", "-g", "-y"]]
 
 
@@ -310,3 +424,56 @@ def test_skills_ensure_command_exits_zero_even_when_the_runner_fails(
     result = CliRunner().invoke(main, ["code-agent", "skills-ensure"])
 
     assert result.exit_code == 0, result.output
+
+
+_ALL_DEFAULT_SKILLS = [
+    "code-review",
+    "codebase-design",
+    "domain-modeling",
+    "grill-with-docs",
+    "improve-codebase-architecture",
+]
+
+
+def test_skills_ensure_command_mentions_skip_count_when_something_else_failed(
+    lock_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from click.testing import CliRunner
+
+    from headroom.cli import code_agent
+    from headroom.cli.main import main
+
+    _write_lock(lock_file, _ALL_DEFAULT_SKILLS)
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    # No registry file is written, so the one default plugin is skipped.
+
+    def failing_runner(argv: list[str]) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(code_agent, "_skills_ensure_runner", failing_runner)
+
+    result = CliRunner().invoke(main, ["code-agent", "skills-ensure"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 configured plugin not installed, skipped" in result.output
+
+
+def test_skills_ensure_command_says_nothing_about_skips_when_nothing_else_failed(
+    lock_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from click.testing import CliRunner
+
+    from headroom.cli import code_agent
+    from headroom.cli.main import main
+
+    _write_lock(lock_file, _ALL_DEFAULT_SKILLS)
+    monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    # No registry file is written, so the one default plugin is skipped --
+    # but nothing else failed, so the summary must stay silent about it.
+
+    monkeypatch.setattr(code_agent, "_skills_ensure_runner", lambda argv: None)
+
+    result = CliRunner().invoke(main, ["code-agent", "skills-ensure"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped" not in result.output

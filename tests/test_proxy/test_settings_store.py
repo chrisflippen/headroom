@@ -177,11 +177,11 @@ class TestEffectiveValues:
 
 
 class TestCodeAgentPlugins:
-    def test_default_is_the_two_built_in_plugins(self, workspace, monkeypatch):
+    def test_default_is_the_one_built_in_plugin(self, workspace, monkeypatch):
         _clear_env(monkeypatch)
         assert (
             settings_store.effective_values()["code_agent.plugins"]
-            == "headroom-code-agent@headroom-code-agent-marketplace,headroom@headroom-marketplace"
+            == "headroom-code-agent@headroom-code-agent-marketplace"
         )
 
     def test_save_then_load_coerces_a_list_to_a_csv_string(self, workspace, monkeypatch):

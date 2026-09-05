@@ -732,7 +732,7 @@ SETTINGS: tuple[SettingField, ...] = (
         "Code agent plugins",
         "Code Agent",
         "csv-list",
-        default="headroom-code-agent@headroom-code-agent-marketplace,headroom@headroom-marketplace",
+        default="headroom-code-agent@headroom-code-agent-marketplace",
         help="Comma-separated Claude Code plugins (<plugin>@<marketplace>) the code agent keeps updated.",
         tier="advanced",
     ),

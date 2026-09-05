@@ -18,9 +18,12 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from headroom.code_tools import plugin_registry
+from headroom.providers.claude.vscode import claude_user_settings_path
 
 # A runner takes one argv list and does something with it (run it for real,
 # or record it in a test). It raises on failure; `ensure` catches that and
@@ -45,13 +48,12 @@ DEFAULT_SKILLS: tuple[dict[str, str], ...] = (
 
 # Claude Code plugins to keep current, as "<plugin>@<marketplace>". The code
 # agent plugin's marketplace is "headroom-code-agent-marketplace" (Fix 1: it
-# ships its own marketplace manifest inside the installed package); the hooks
-# plugin's marketplace, "headroom-marketplace", is unrelated and managed by
-# `headroom init`.
-DEFAULT_PLUGINS: tuple[str, ...] = (
-    "headroom-code-agent@headroom-code-agent-marketplace",
-    "headroom@headroom-marketplace",
-)
+# ships its own marketplace manifest inside the installed package). The hooks
+# plugin (`headroom@headroom-marketplace`) is installed and managed by
+# `headroom init`, not this default list -- Christopher can still add it
+# through the `code_agent.plugins` setting if he wants it kept updated here
+# too.
+DEFAULT_PLUGINS: tuple[str, ...] = ("headroom-code-agent@headroom-code-agent-marketplace",)
 
 # Two dotted, flat keys in headroom's settings.json (see headroom.settings_store
 # for the file this lives in) that let Christopher override the lists above.
@@ -64,15 +66,19 @@ class EnsureResult:
     """What one call to `ensure` did.
 
     `ran` is False when the throttle skipped the run entirely -- in that
-    case `commands` and `failures` are both empty and `skipped_reason` says
-    why. When `ran` is True, `commands` lists every argv attempted, in
-    order, and `failures` holds a short message per command that raised.
+    case `commands`, `failures`, and `skipped_plugins` are all empty and
+    `skipped_reason` says why. When `ran` is True, `commands` lists every
+    argv attempted, in order, and `failures` holds a short message per
+    command that raised. `skipped_plugins` lists the configured plugins
+    that were not installed on this machine, so no update command was
+    attempted for them and that is not a failure.
     """
 
     ran: bool
     commands: list[list[str]]
     failures: list[str]
     skipped_reason: str | None = None
+    skipped_plugins: list[str] = field(default_factory=list)
 
 
 def _read_last_run(state_path: Path) -> datetime | None:
@@ -144,6 +150,35 @@ def _run_one(
         failures.append(f"{' '.join(argv)}: {exc}")
 
 
+def _plugin_registry_path() -> Path:
+    """Where Claude Code's own plugin registry lives on this machine.
+
+    Goes through `claude_user_settings_path`, which respects `HOME` (and
+    `CLAUDE_CONFIG_DIR`) -- a test points this at a fake registry the same
+    way it points anything else at a fake `$HOME`.
+    """
+    return plugin_registry.installed_plugins_path(claude_user_settings_path())
+
+
+def _partition_installed_plugins(plugins: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split `plugins` into (installed, not installed) using the registry.
+
+    A plugin Christopher configured but that is not installed on this
+    machine has no update command to run for it, and that is not a
+    failure -- it is just skipped, since not every machine has every
+    plugin the settings file lists.
+    """
+    registry_path = _plugin_registry_path()
+    installed_plugins: list[str] = []
+    skipped_plugins: list[str] = []
+    for plugin in plugins:
+        if plugin_registry.plugin_installed(registry_path, plugin):
+            installed_plugins.append(plugin)
+        else:
+            skipped_plugins.append(plugin)
+    return installed_plugins, skipped_plugins
+
+
 def _run_plugins_concurrently(
     runner: Runner, plugins: Sequence[str], commands: list[list[str]], failures: list[str]
 ) -> None:
@@ -192,9 +227,12 @@ def ensure(
     Every skill in `skills` that skills.sh's lock file does not already list
     gets installed with one batched `npx skills add <source1> <source2> ...
     -g -y` call. Then `npx skills update -g -y` runs once, followed by one
-    `claude plugin update <plugin> --scope user -y` per entry in `plugins`,
-    all run concurrently since they are independent of each other. A
-    command that raises has its failure recorded and the rest still run.
+    `claude plugin update <plugin> --scope user -y` per entry in `plugins`
+    that Claude Code's own registry says is actually installed on this
+    machine, all run concurrently since they are independent of each other.
+    A plugin the registry does not list is skipped -- no update command, no
+    failure -- and its name goes on `EnsureResult.skipped_plugins` instead.
+    A command that raises has its failure recorded and the rest still run.
     The state file is written whenever the run was not skipped, even if
     every command failed.
     """
@@ -221,11 +259,18 @@ def ensure(
 
     _run_one(runner, ["npx", "skills", "update", "-g", "-y"], commands, failures)
 
-    _run_plugins_concurrently(runner, plugins, commands, failures)
+    installed_plugins, skipped_plugins = _partition_installed_plugins(plugins)
+    _run_plugins_concurrently(runner, installed_plugins, commands, failures)
 
     _write_last_run(state_path, now)
 
-    return EnsureResult(ran=True, commands=commands, failures=failures, skipped_reason=None)
+    return EnsureResult(
+        ran=True,
+        commands=commands,
+        failures=failures,
+        skipped_reason=None,
+        skipped_plugins=skipped_plugins,
+    )
 
 
 def load_configured_skills_and_plugins() -> tuple[list[dict[str, str]], list[str]]:

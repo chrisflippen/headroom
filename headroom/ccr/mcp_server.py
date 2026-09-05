@@ -669,16 +669,11 @@ class HeadroomMCPServer:
             Tool(
                 name=SEARCH_TOOL_NAME,
                 description=(
-                    "Use this for every file and code lookup — never the built-in Read, Glob, "
-                    "or Grep. 'read' returns numbered lines and a stamp; pass the stamp back "
-                    "on a later read of the same file to get a short unchanged marker instead "
-                    "of the text if it still matches. That marker means you already have the "
-                    "content — don't re-read it or call it missing. 'find' lists files by "
-                    "pattern, honoring .gitignore, instead of Glob. 'grep' searches file "
-                    "contents, grouped by file, instead of Grep. 'symbols' shows a file's "
-                    "classes, functions, and types before you read it whole. 'importers' "
-                    "shows what would break before you rename or change a public symbol. Pass "
-                    "start/end for a line range on read."
+                    "Use this for file and code lookup — never the built-in Read, Glob, or "
+                    "Grep. 'read' returns a stamp; pass it back later to get an 'unchanged' "
+                    "marker instead of text you already have — don't re-read it. 'find' lists "
+                    "files, 'grep' searches contents, 'symbols' outlines a file, 'importers' "
+                    "shows what a rename would break."
                 ),
                 inputSchema={
                     "type": "object",
@@ -740,14 +735,11 @@ class HeadroomMCPServer:
             Tool(
                 name=EDIT_TOOL_NAME,
                 description=(
-                    "Use this tool for every file change — never the built-in Edit or Write "
-                    "tools. 'replace' swaps one piece of text for another; pass all=true if it "
-                    "appears more than once and you want every occurrence changed. 'multi' "
-                    "applies several replacements to one file in order, or writes none of them "
-                    "if any fails. 'create' makes a new file (or overwrites one if you pass "
-                    "overwrite=true). 'delete' removes a file. 'rename' moves a file to a new "
-                    "path given in 'to'. Every action that writes a file returns a new stamp; "
-                    "pass that to Search's 'read' later instead of reading the file again."
+                    "Use this for every file change — never the built-in Edit or Write. "
+                    "'replace' swaps text (pass all=true for every occurrence); 'multi' "
+                    "applies several replacements atomically; 'create' writes a new file; "
+                    "'delete' removes one; 'rename' moves one. Every write returns a stamp — "
+                    "pass it to Search's 'read' later instead of reading the file again."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1098,27 +1090,18 @@ class HeadroomMCPServer:
 
         Path handling and the stamp live in headroom.code_tools.search — this
         method just calls it and, on an unchanged-file marker, records the
-        token savings the same way the rest of this server does. There is no
-        cache to consult here: the marker only comes back when the caller's
-        own stamp already matched, so the file is read once more just to
-        estimate how many tokens the marker saved.
+        token savings the same way the rest of this server does. The marker
+        itself carries the token estimate, so there is no need to re-read the
+        file just to compute it.
         """
         from headroom.code_tools import search as code_tools_search
-        from headroom.proxy.helpers import safe_decode_for_logging
 
         text = code_tools_search.search(arguments, root=Path.cwd())
 
         if code_tools_search.is_unchanged_marker(text) and arguments.get("action") == "read":
-            try:
-                raw_path = arguments.get("path")
-                if raw_path:
-                    resolved = code_tools_search.resolve_path(str(raw_path), Path.cwd())
-                    content = safe_decode_for_logging(resolved.read_bytes())
-                    token_estimate = len(content.split())
-                    self._stats.record_compression(token_estimate, 5, "search_unchanged")
-            except Exception:
-                # Stats bookkeeping must never break the tool call itself.
-                pass
+            token_estimate = code_tools_search.unchanged_marker_tokens(text)
+            if token_estimate is not None:
+                self._stats.record_compression(token_estimate, 5, "search_unchanged")
 
         return [TextContent(type="text", text=text)]
 

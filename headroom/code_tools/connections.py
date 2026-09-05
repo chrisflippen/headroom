@@ -2,11 +2,12 @@
 
 The code agent's Sql tool never sees a raw connection URL or password. A
 connection is added once under a short name; from then on the name is what
-gets passed around. The name, the database kind, and a keychain lookup
-pointer (service + account) live in a small JSON file under the config
-directory. The URL itself -- which usually carries a password -- lives only
-in a keychain, reached through a small adapter so tests never touch the
-real macOS keychain.
+gets passed around. The name and the database kind live in a small JSON
+file under the config directory. The URL itself -- which usually carries a
+password -- lives only in a keychain, reached through a small adapter so
+tests never touch the real macOS keychain, under the module-level
+``KEYCHAIN_SERVICE`` and the connection's name as the account -- neither is
+worth persisting per entry since both are always derivable.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
-from headroom import paths
+from headroom import fsutil, paths
 from headroom._subprocess import run
 
 KEYCHAIN_SERVICE = "headroom-code-agent"
@@ -99,7 +100,7 @@ class MacOSKeychain:
         )
 
 
-def _kind_from_url(url: str) -> str:
+def kind_from_url(url: str) -> str:
     scheme = urlparse(url).scheme.lower()
     if scheme in _POSTGRES_SCHEMES:
         return "postgres"
@@ -114,11 +115,12 @@ def _config_path() -> Path:
 
 def _load_config() -> dict[str, dict[str, dict[str, str]]]:
     path = _config_path()
-    if not path.exists():
+    text = fsutil.read_text(path, default=None)
+    if text is None:
         return {"connections": {}}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(text)
+    except json.JSONDecodeError:
         return {"connections": {}}
     if not isinstance(data, dict) or not isinstance(data.get("connections"), dict):
         return {"connections": {}}
@@ -128,20 +130,16 @@ def _load_config() -> dict[str, dict[str, dict[str, str]]]:
 def _save_config(data: dict[str, dict[str, dict[str, str]]]) -> None:
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    fsutil.write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def add_connection(name: str, url: str, store: Keychain) -> None:
-    """Add a named connection: kind and a keychain pointer on disk, url in the keychain."""
+    """Add a named connection: kind on disk, url in the keychain."""
 
-    kind = _kind_from_url(url)
+    kind = kind_from_url(url)
     store.set_secret(KEYCHAIN_SERVICE, name, url)
     data = _load_config()
-    data["connections"][name] = {
-        "kind": kind,
-        "keychain_service": KEYCHAIN_SERVICE,
-        "keychain_account": name,
-    }
+    data["connections"][name] = {"kind": kind}
     _save_config(data)
 
 
@@ -152,7 +150,7 @@ def resolve_connection(name: str, store: Keychain) -> str:
     entry = data["connections"].get(name)
     if entry is None:
         raise KeyError(f"no connection named {name!r}")
-    url = store.get_secret(entry["keychain_service"], entry["keychain_account"])
+    url = store.get_secret(KEYCHAIN_SERVICE, name)
     if url is None:
         raise KeyError(f"no secret in the keychain for connection {name!r}")
     return url
@@ -165,7 +163,7 @@ def remove_connection(name: str, store: Keychain) -> None:
     entry = data["connections"].pop(name, None)
     _save_config(data)
     if entry is not None:
-        store.delete_secret(entry["keychain_service"], entry["keychain_account"])
+        store.delete_secret(KEYCHAIN_SERVICE, name)
 
 
 def list_connections() -> list[str]:
@@ -180,6 +178,7 @@ __all__ = [
     "Keychain",
     "MemoryKeychain",
     "MacOSKeychain",
+    "kind_from_url",
     "add_connection",
     "resolve_connection",
     "remove_connection",

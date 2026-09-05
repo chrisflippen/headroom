@@ -16,16 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from headroom import fsutil
-from headroom.code_tools.search import PathOutsideRootError, file_stamp, resolve_path
-from headroom.proxy.helpers import safe_decode_for_logging
-
-
-def _read_file_text(path: Path) -> str:
-    return safe_decode_for_logging(path.read_bytes())
-
-
-def _line_count(content: str) -> int:
-    return content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+from headroom.code_tools.search import (
+    PathOutsideRootError,
+    _line_count,
+    _read_file_text,
+    file_stamp,
+    resolve_path,
+)
 
 
 def _resolve(raw_path: str, root: Path) -> Path | str:
@@ -46,6 +43,39 @@ def _resolve(raw_path: str, root: Path) -> Path | str:
         return f"error: refused: path under .git: {raw_path}"
 
     return path
+
+
+def _resolve_existing_file(
+    request: dict[str, Any],
+    root: Path,
+    *,
+    is_dir_message: str = "error: path is a directory: {raw_path}",
+) -> tuple[Path, str] | str:
+    """Resolve ``request["path"]`` to a file that must already exist.
+
+    Folds the path-required / resolve / exists / is-a-directory checks that
+    ``replace``, ``multi``, and ``delete`` each repeat. Returns
+    ``(resolved_path, raw_path)`` on success, or a plain error string a
+    handler can return straight to its caller. ``is_dir_message`` lets
+    ``delete`` keep its own "refused" wording for a directory target.
+    """
+
+    raw_path = request.get("path")
+    if not raw_path:
+        return "error: path is required"
+    raw_path = str(raw_path)
+
+    resolved = _resolve(raw_path, root)
+    if isinstance(resolved, str):
+        return resolved
+    path = resolved
+
+    if not path.exists():
+        return f"error: file not found: {raw_path}"
+    if path.is_dir():
+        return is_dir_message.format(raw_path=raw_path)
+
+    return path, raw_path
 
 
 def _find_occurrences(content: str, old: str) -> list[int]:
@@ -71,10 +101,10 @@ def _line_span(content: str, offset: int, length: int) -> tuple[int, int]:
 
 
 def _handle_replace(request: dict[str, Any], root: Path) -> str:
-    raw_path = request.get("path")
-    if not raw_path:
-        return "error: path is required"
-    raw_path = str(raw_path)
+    resolved = _resolve_existing_file(request, root)
+    if isinstance(resolved, str):
+        return resolved
+    path, raw_path = resolved
 
     old = request.get("old")
     new = request.get("new")
@@ -83,16 +113,6 @@ def _handle_replace(request: dict[str, Any], root: Path) -> str:
     old = str(old)
     new = str(new)
     replace_all = bool(request.get("all", False))
-
-    resolved = _resolve(raw_path, root)
-    if isinstance(resolved, str):
-        return resolved
-    path = resolved
-
-    if not path.exists():
-        return f"error: file not found: {raw_path}"
-    if path.is_dir():
-        return f"error: path is a directory: {raw_path}"
 
     try:
         content = _read_file_text(path)
@@ -125,24 +145,14 @@ def _handle_replace(request: dict[str, Any], root: Path) -> str:
 
 
 def _handle_multi(request: dict[str, Any], root: Path) -> str:
-    raw_path = request.get("path")
-    if not raw_path:
-        return "error: path is required"
-    raw_path = str(raw_path)
+    resolved = _resolve_existing_file(request, root)
+    if isinstance(resolved, str):
+        return resolved
+    path, raw_path = resolved
 
     edits = request.get("edits")
     if not isinstance(edits, list) or not edits:
         return "error: edits is required and must be a non-empty list"
-
-    resolved = _resolve(raw_path, root)
-    if isinstance(resolved, str):
-        return resolved
-    path = resolved
-
-    if not path.exists():
-        return f"error: file not found: {raw_path}"
-    if path.is_dir():
-        return f"error: path is a directory: {raw_path}"
 
     try:
         content = _read_file_text(path)
@@ -209,20 +219,12 @@ def _handle_create(request: dict[str, Any], root: Path) -> str:
 
 
 def _handle_delete(request: dict[str, Any], root: Path) -> str:
-    raw_path = request.get("path")
-    if not raw_path:
-        return "error: path is required"
-    raw_path = str(raw_path)
-
-    resolved = _resolve(raw_path, root)
+    resolved = _resolve_existing_file(
+        request, root, is_dir_message="error: refused: path is a directory: {raw_path}"
+    )
     if isinstance(resolved, str):
         return resolved
-    path = resolved
-
-    if not path.exists():
-        return f"error: file not found: {raw_path}"
-    if path.is_dir():
-        return f"error: refused: path is a directory: {raw_path}"
+    path, raw_path = resolved
 
     path.unlink()
     return f"deleted {raw_path}"

@@ -27,12 +27,12 @@ import hashlib
 import os
 import re
 import shutil
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from headroom._subprocess import run as _run_subprocess
 from headroom.proxy.helpers import safe_decode_for_logging
 from headroom.transforms.code_compressor import (
     _LANG_CONFIGS,
@@ -81,6 +81,21 @@ def is_unchanged_marker(text: str) -> bool:
     """True when ``text`` is the unchanged-file marker the ``read`` action emits."""
 
     return text.startswith("<file ") and 'status="unchanged"' in text
+
+
+_MARKER_TOKENS_PATTERN = re.compile(r'tokens="(\d+)"')
+
+
+def unchanged_marker_tokens(text: str) -> int | None:
+    """Pull the token estimate out of an unchanged-file marker, or ``None``.
+
+    The estimate is embedded in the marker itself so a caller that only sees
+    the marker (never the file bytes) can still record token savings without
+    reading the file a second time.
+    """
+
+    match = _MARKER_TOKENS_PATTERN.search(text)
+    return int(match.group(1)) if match else None
 
 
 def _numbered_lines(content: str) -> str:
@@ -147,7 +162,11 @@ def _handle_read(request: dict[str, Any], root: Path) -> str:
     line_count = _line_count(content)
     provided_stamp = request.get("stamp")
     if isinstance(provided_stamp, str) and provided_stamp == stamp:
-        return f'<file path="{rel}" status="unchanged" lines="{line_count}" stamp="{stamp}"/>'
+        token_estimate = len(content.split())
+        return (
+            f'<file path="{rel}" status="unchanged" lines="{line_count}" '
+            f'tokens="{token_estimate}" stamp="{stamp}"/>'
+        )
 
     header = f"file: {rel} lines={line_count} stamp={stamp}"
     return f"{header}\n{_numbered_lines(content)}"
@@ -161,32 +180,48 @@ _SKIP_DIR_NAMES = {".git", "node_modules", ".venv", "__pycache__"}
 _DEFAULT_FIND_LIMIT = 200
 
 
-def _is_git_repo(root: Path) -> bool:
+_tracked_files_cache: dict[tuple[str, float], list[str]] = {}
+
+
+def tracked_files(root: Path) -> list[str] | None:
+    """Return the git-tracked (plus untracked-but-not-ignored) files under
+    ``root``, or ``None`` if ``root`` isn't a git repo.
+
+    A single ``git ls-files`` call does the job: a failure already means
+    "not a repo", so there's no separate ``rev-parse`` check first. The
+    result is cached in-process, keyed by the root and the mtime of
+    ``.git/index`` — as long as the index hasn't changed, a repeat call in
+    the same process reuses the prior listing instead of spawning ``git``
+    again. Shared by ``find``, the Python grep fallback, ``importers``, and
+    ``brief.py``'s prompt-time file listing, so there's exactly one place
+    that knows how to list a repo's files.
+    """
+
+    root_resolved = str(root.resolve())
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        mtime = (root / ".git" / "index").stat().st_mtime
     except OSError:
-        return False
-    return proc.returncode == 0 and proc.stdout.strip() == "true"
+        mtime = -1.0
+    cache_key = (root_resolved, mtime)
+    cached = _tracked_files_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
-
-def _git_tracked_files(root: Path) -> list[str]:
     try:
-        proc = subprocess.run(
+        proc = _run_subprocess(
             ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard"],
             capture_output=True,
             text=True,
             timeout=30,
         )
     except OSError:
-        return []
+        return None
     if proc.returncode != 0:
-        return []
-    return [line for line in proc.stdout.splitlines() if line]
+        return None
+
+    files = [line for line in proc.stdout.splitlines() if line]
+    _tracked_files_cache[cache_key] = files
+    return files
 
 
 def _walk_all_files(root: Path) -> list[str]:
@@ -207,8 +242,9 @@ def _list_repo_files(root: Path) -> list[str]:
     usual noisy directories.
     """
 
-    if _is_git_repo(root):
-        return _git_tracked_files(root)
+    tracked = tracked_files(root)
+    if tracked is not None:
+        return tracked
     return _walk_all_files(root)
 
 
@@ -345,7 +381,7 @@ def _grep_with_rg(
         cmd += ["-C", str(context)]
     cmd += ["-e", pattern, search_target]
     try:
-        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=30)
+        proc = _run_subprocess(cmd, cwd=root, capture_output=True, text=True, timeout=30)
     except OSError as exc:
         return [], f"error: could not run rg: {exc}"
     if proc.returncode == 1:

@@ -272,18 +272,18 @@ def test_marketplace_source_prefers_local_checkout(monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
-def test_remove_all_removes_switch_plugin_and_read_cache(tmp_path: Path) -> None:
+def test_remove_all_removes_switch_plugin_and_tool_state(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     code_agent.ensure_agent_switch(settings_path)
     workspace_dir = tmp_path / "workspace"
     code_tools_dir = workspace_dir / "code_tools"
     code_tools_dir.mkdir(parents=True)
-    (code_tools_dir / "read_cache.sqlite").write_text("data")
+    (code_tools_dir / "skills_ensure.json").write_text("{}")
     calls: list[list[str]] = []
 
     removed = code_agent.remove_all(settings_path, calls.append, workspace_dir)
 
-    assert removed == ["agent switch", "plugin", "read cache"]
+    assert removed == ["agent switch", "plugin", "tool state"]
     assert "agent" not in json.loads(settings_path.read_text())
     assert not code_tools_dir.exists()
     assert calls == [
@@ -608,3 +608,29 @@ def test_unwrap_claude_removes_agent_switch(
 
     assert result.exit_code == 0, result.output
     assert "agent" not in json.loads(settings_path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# _skills_ensure_runner
+# ---------------------------------------------------------------------------
+
+
+def test_skills_ensure_runner_caps_the_subprocess_timeout_at_25_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> _FakeResult:
+        captured.update(kwargs)
+        return _FakeResult()
+
+    monkeypatch.setattr(code_agent, "run", fake_run)
+
+    code_agent._skills_ensure_runner(["npx", "skills", "update", "-g", "-y"])
+
+    assert captured["timeout"] == 25

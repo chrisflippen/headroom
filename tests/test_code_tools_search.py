@@ -66,7 +66,9 @@ def test_read_with_matching_stamp_returns_only_marker(tmp_path: Path) -> None:
     second = search({"action": "read", "path": "a.py", "stamp": V1_STAMP}, root=tmp_path)
 
     assert first == f"file: a.py lines=2 stamp={V1_STAMP}\n{V1_NUMBERED}"
-    assert second == f'<file path="a.py" status="unchanged" lines="2" stamp="{V1_STAMP}"/>'
+    assert second == (
+        f'<file path="a.py" status="unchanged" lines="2" tokens="2" stamp="{V1_STAMP}"/>'
+    )
 
 
 def test_read_without_a_stamp_is_a_full_read_even_when_unchanged(tmp_path: Path) -> None:
@@ -119,7 +121,9 @@ def test_read_with_new_stamp_after_a_change_returns_the_marker(tmp_path: Path) -
 
     result = search({"action": "read", "path": "a.py", "stamp": V2_STAMP}, root=tmp_path)
 
-    assert result == f'<file path="a.py" status="unchanged" lines="3" stamp="{V2_STAMP}"/>'
+    assert result == (
+        f'<file path="a.py" status="unchanged" lines="3" tokens="3" stamp="{V2_STAMP}"/>'
+    )
 
 
 # --- 4. No cache: nothing is consulted or written to disk -------------------
@@ -257,7 +261,7 @@ def test_search_tool_is_registered_and_read_tool_is_gone() -> None:
     assert "grep" in description
     assert "symbols" in description
     assert "importers" in description
-    assert len(description.split()) < 120
+    assert len(description.split()) < 60
 
 
 def test_server_has_no_leftover_read_state() -> None:
@@ -292,7 +296,7 @@ def test_handle_search_records_stats_on_unchanged_marker(
     )
 
     assert response[0].kwargs["text"] == (
-        f'<file path="a.py" status="unchanged" lines="2" stamp="{V1_STAMP}"/>'
+        f'<file path="a.py" status="unchanged" lines="2" tokens="2" stamp="{V1_STAMP}"/>'
     )
     assert server._stats.compressions == before + 1
     assert server._stats.events[-1]["strategy"] == "search_unchanged"

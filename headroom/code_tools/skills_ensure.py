@@ -16,6 +16,7 @@ without touching the real `npx` or `claude` binaries.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -139,6 +140,40 @@ def _run_one(
         failures.append(f"{' '.join(argv)}: {exc}")
 
 
+def _run_plugins_concurrently(
+    runner: Runner, plugins: Sequence[str], commands: list[list[str]], failures: list[str]
+) -> None:
+    """Run every plugin's update command on its own thread.
+
+    One slow or hanging `claude plugin update` must never delay the rest.
+    `commands` and `failures` end up in `plugins`' declared order regardless
+    of which thread finishes first -- each thread only records its own
+    outcome, and the results are appended to the shared lists afterward, in
+    order, from the main thread.
+    """
+    argvs = [["claude", "plugin", "update", plugin, "--scope", "user", "-y"] for plugin in plugins]
+    outcomes: list[str | None] = [None] * len(argvs)
+
+    def worker(index: int, argv: list[str]) -> None:
+        try:
+            runner(argv)
+        except Exception as exc:  # a bad update must never block a session
+            outcomes[index] = f"{' '.join(argv)}: {exc}"
+
+    threads = [
+        threading.Thread(target=worker, args=(index, argv)) for index, argv in enumerate(argvs)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    for argv, failure in zip(argvs, outcomes):
+        commands.append(argv)
+        if failure is not None:
+            failures.append(failure)
+
+
 def ensure(
     skills: Sequence[dict[str, str]],
     plugins: Sequence[str],
@@ -150,12 +185,14 @@ def ensure(
 ) -> EnsureResult:
     """Update skills and plugins through `runner`, at most once a day.
 
-    Any skill in `skills` that skills.sh's lock file does not already list
-    gets an `npx skills add <source> -g -y` first. Then `npx skills update
-    -g -y` runs once, followed by one `claude plugin update <plugin>
-    --scope user -y` per entry in `plugins`. A command that raises has its
-    failure recorded and the rest still run. The state file is written
-    whenever the run was not skipped, even if every command failed.
+    Every skill in `skills` that skills.sh's lock file does not already list
+    gets installed with one batched `npx skills add <source1> <source2> ...
+    -g -y` call. Then `npx skills update -g -y` runs once, followed by one
+    `claude plugin update <plugin> --scope user -y` per entry in `plugins`,
+    all run concurrently since they are independent of each other. A
+    command that raises has its failure recorded and the rest still run.
+    The state file is written whenever the run was not skipped, even if
+    every command failed.
     """
     last_run = _read_last_run(state_path)
     if last_run is not None:
@@ -173,18 +210,14 @@ def ensure(
     failures: list[str] = []
 
     installed = _installed_skill_names()
-    for skill in skills:
-        name = skill["name"]
-        if name in installed:
-            continue
-        argv = ["npx", "skills", "add", skill["source"], "-g", "-y"]
+    missing_sources = [skill["source"] for skill in skills if skill["name"] not in installed]
+    if missing_sources:
+        argv = ["npx", "skills", "add", *missing_sources, "-g", "-y"]
         _run_one(runner, argv, commands, failures)
 
     _run_one(runner, ["npx", "skills", "update", "-g", "-y"], commands, failures)
 
-    for plugin in plugins:
-        argv = ["claude", "plugin", "update", plugin, "--scope", "user", "-y"]
-        _run_one(runner, argv, commands, failures)
+    _run_plugins_concurrently(runner, plugins, commands, failures)
 
     _write_last_run(state_path, now)
 

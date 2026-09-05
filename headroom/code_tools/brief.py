@@ -29,8 +29,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from headroom._subprocess import run
+from headroom.code_tools.search import tracked_files
 
 # Set on the child `claude -p` process the default model runner spawns, and
 # checked at the top of the `headroom code-agent brief` CLI command. The child
@@ -53,6 +55,13 @@ _MAX_LIKELY_FILES = 8
 _MAX_MEMORIES = 5
 
 _MIN_WORDS = 12
+
+# Gathering context (CONTEXT.md, memory search, likely files) gets its own
+# small cap, separate from the model call's share of `budget_seconds`. A
+# cold embedder or a slow memory database can then never silently eat into
+# the time the model call gets -- gather either finishes well inside this
+# cap or it is abandoned and the brief falls back to an empty context.
+_GATHER_BUDGET_SECONDS = 2.0
 
 _PLAIN_REPLIES = {
     "yes",
@@ -136,7 +145,10 @@ def should_brief(prompt: str) -> bool:
     return True
 
 
-def _run_with_budget(build: Callable[[], str], budget_seconds: float) -> str | None:
+_T = TypeVar("_T")
+
+
+def _run_with_budget(build: Callable[[], _T], budget_seconds: float) -> _T | None:
     """Run `build` on a daemon thread and wait at most `budget_seconds`.
 
     Returns `None` on timeout or on any exception `build` raises. The
@@ -144,7 +156,7 @@ def _run_with_budget(build: Callable[[], str], budget_seconds: float) -> str | N
     budget) never keeps the process alive -- it is simply left to finish
     or die on its own.
     """
-    outcome: dict[str, str] = {}
+    outcome: dict[str, _T] = {}
 
     def _target() -> None:
         try:
@@ -160,6 +172,9 @@ def _run_with_budget(build: Callable[[], str], budget_seconds: float) -> str | N
     return outcome.get("value")
 
 
+_EMPTY_CONTEXT = GatheredContext(memories=[], glossary=[], likely_files=[])
+
+
 def make_brief(
     prompt: str,
     *,
@@ -171,19 +186,28 @@ def make_brief(
     """Return a brief for `prompt`, or `None` if none applies or it failed.
 
     Runs `should_brief` first -- when it is False, `gather` and
-    `model_runner` are never called. Otherwise gathering context and
-    calling the model together are capped at `budget_seconds`; going over
-    that, or either one raising, yields `None` rather than propagating.
+    `model_runner` are never called. Gathering context gets its own small
+    cap (`_GATHER_BUDGET_SECONDS`, or all of `budget_seconds` if that is
+    smaller); a gatherer that runs past its cap or raises is abandoned in
+    favor of an empty context, rather than eating into the model call's
+    share. The model call gets whatever of `budget_seconds` is left; going
+    over that, or raising, yields `None` rather than propagating.
     """
     if not should_brief(prompt):
         return None
 
-    def _build() -> str:
-        context = gather(prompt, cwd)
-        user_text = _render_user_text(prompt, context)
-        return model_runner(_SYSTEM_PROMPT, user_text, budget_seconds)
+    gather_budget = min(_GATHER_BUDGET_SECONDS, budget_seconds)
+    model_budget = max(0.0, budget_seconds - gather_budget)
 
-    return _run_with_budget(_build, budget_seconds)
+    context = _run_with_budget(lambda: gather(prompt, cwd), gather_budget)
+    if context is None:
+        context = _EMPTY_CONTEXT
+
+    def _call_model() -> str:
+        user_text = _render_user_text(prompt, context)
+        return model_runner(_SYSTEM_PROMPT, user_text, model_budget)
+
+    return _run_with_budget(_call_model, model_budget)
 
 
 def _render_user_text(prompt: str, context: GatheredContext) -> str:
@@ -304,28 +328,9 @@ _IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]{2,}")
 _CODE_LIKE = re.compile(r"_|\d|[a-z][A-Z]|^.{6,}$")
 
 
-def _tracked_files(root: Path) -> list[str]:
-    """Every file `root` tracks in git, or `[]` when it is not a git repo."""
-    git_bin = shutil.which("git")
-    if git_bin is None:
-        return []
-    try:
-        result = run(
-            [git_bin, "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except OSError:
-        return []
-    if result.returncode != 0:
-        return []
-    return [line for line in result.stdout.splitlines() if line]
-
-
 def _likely_files(prompt: str, root: Path) -> list[str]:
     """Tracked files whose path, name, or stem a token in the prompt names."""
-    tracked = _tracked_files(root)
+    tracked = tracked_files(root) or []
     if not tracked:
         return []
 

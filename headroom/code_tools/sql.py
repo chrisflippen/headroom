@@ -13,8 +13,11 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
+
+from headroom.code_tools.connections import kind_from_url
 
 _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 1000
@@ -50,12 +53,12 @@ def query(request: dict[str, Any], resolver: Callable[[str], str]) -> str:
 
     limit = _clamp_limit(request.get("limit"))
     url = resolver(connection_name)
-    kind = _kind_from_url(url)
-    if kind == "sqlite":
-        columns, rows, truncated = _sqlite_select(url, raw_sql, limit)
-    else:
-        columns, rows, truncated = _postgres_select(url, raw_sql, limit)
-    return _render_table(columns, rows, truncated)
+    connection = _open(url)
+    try:
+        result = _select(connection, raw_sql, limit)
+    finally:
+        connection.close()
+    return _render_table(result.columns, result.rows, result.truncated)
 
 
 def _refuse_unless_read_only(raw_sql: str) -> str | None:
@@ -83,17 +86,17 @@ def _clamp_limit(raw_limit: Any) -> int:
     return min(value, _MAX_LIMIT)
 
 
-def _kind_from_url(url: str) -> str:
-    scheme = urlparse(url).scheme.lower()
-    if scheme in {"postgres", "postgresql"}:
-        return "postgres"
-    if scheme == "sqlite":
-        return "sqlite"
-    raise ValueError(f"unsupported connection URL scheme: {scheme!r}")
+@dataclass(frozen=True)
+class QueryResult:
+    """The result of a single read-only ``SELECT``."""
+
+    columns: list[str]
+    rows: list[tuple[Any, ...]]
+    truncated: bool
 
 
 # ---------------------------------------------------------------------------
-# SQLite driver
+# Connecting -- one dispatcher, driver-specific only in how it opens
 # ---------------------------------------------------------------------------
 
 
@@ -112,49 +115,11 @@ def open_sqlite_readonly(path: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
-def _sqlite_select(
-    url: str, raw_sql: str, limit: int
-) -> tuple[list[str], list[tuple[Any, ...]], bool]:
-    path = _sqlite_path_from_url(url)
-    connection = open_sqlite_readonly(path)
-    try:
-        cursor = connection.cursor()
-        cursor.execute(raw_sql)
-        columns = [description[0] for description in cursor.description or []]
-        fetched = cursor.fetchmany(limit + 1)
-        truncated = len(fetched) > limit
-        rows = [tuple(row) for row in fetched[:limit]]
-        return columns, rows, truncated
-    finally:
-        connection.close()
-
-
-def _sqlite_schema(url: str) -> list[tuple[str, list[tuple[str, str]]]]:
-    path = _sqlite_path_from_url(url)
-    connection = open_sqlite_readonly(path)
-    try:
-        cursor = connection.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        table_names = [row[0] for row in cursor.fetchall()]
-        tables = []
-        for table_name in table_names:
-            cursor.execute(f'PRAGMA table_info("{table_name}")')
-            columns = [(row[1], row[2]) for row in cursor.fetchall()]
-            tables.append((table_name, columns))
-        return tables
-    finally:
-        connection.close()
-
-
-# ---------------------------------------------------------------------------
-# Postgres driver
-#
 # No Postgres driver (psycopg, psycopg2, asyncpg) is installed in this
 # project's venv, and the brief for this slice says not to add one. So the
 # connect function is a module-level hook: at runtime it lazily imports
 # whichever driver is available, and tests replace it with a fake to prove
 # the read-only transaction wrapping without a real Postgres server.
-# ---------------------------------------------------------------------------
 
 
 def _default_postgres_connect(url: str) -> Any:
@@ -179,58 +144,80 @@ def _default_postgres_connect(url: str) -> Any:
 postgres_connect: Callable[[str], Any] = _default_postgres_connect
 
 
-def _postgres_select(
-    url: str, raw_sql: str, limit: int
-) -> tuple[list[str], list[tuple[Any, ...]], bool]:
-    connection = postgres_connect(url)
-    try:
-        cursor = connection.cursor()
-        cursor.execute("BEGIN READ ONLY")
-        cursor.execute(raw_sql)
-        columns = [description[0] for description in cursor.description or []]
-        fetched = cursor.fetchmany(limit + 1)
-        truncated = len(fetched) > limit
-        rows = [tuple(row) for row in fetched[:limit]]
-        return columns, rows, truncated
-    finally:
-        connection.close()
+def _open(url: str) -> Any:
+    """Open ``url`` ready for read-only statements: sqlite in ``mode=ro``,
+    Postgres with a ``BEGIN READ ONLY`` transaction already started."""
 
-
-def _postgres_schema(url: str) -> list[tuple[str, list[tuple[str, str]]]]:
+    if kind_from_url(url) == "sqlite":
+        return open_sqlite_readonly(_sqlite_path_from_url(url))
     connection = postgres_connect(url)
-    try:
-        cursor = connection.cursor()
-        cursor.execute("BEGIN READ ONLY")
-        cursor.execute(
-            "SELECT table_name, column_name, data_type "
-            "FROM information_schema.columns "
-            "WHERE table_schema = 'public' "
-            "ORDER BY table_name, ordinal_position"
-        )
-        tables: list[tuple[str, list[tuple[str, str]]]] = []
-        by_table: dict[str, list[tuple[str, str]]] = {}
-        for table_name, column_name, data_type in cursor.fetchall():
-            if table_name not in by_table:
-                by_table[table_name] = []
-                tables.append((table_name, by_table[table_name]))
-            by_table[table_name].append((column_name, data_type))
-        return tables
-    finally:
-        connection.close()
+    connection.cursor().execute("BEGIN READ ONLY")
+    return connection
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# Select -- identical cursor/fetch/truncate logic for either driver
 # ---------------------------------------------------------------------------
+
+
+def _select(connection: Any, raw_sql: str, limit: int) -> QueryResult:
+    cursor = connection.cursor()
+    cursor.execute(raw_sql)
+    columns = [description[0] for description in cursor.description or []]
+    fetched = cursor.fetchmany(limit + 1)
+    truncated = len(fetched) > limit
+    rows = [tuple(row) for row in fetched[:limit]]
+    return QueryResult(columns=columns, rows=rows, truncated=truncated)
+
+
+# ---------------------------------------------------------------------------
+# Schema -- the queries are backend-specific, but connecting/closing is not
+# ---------------------------------------------------------------------------
+
+
+def _schema(connection: Any) -> list[tuple[str, list[tuple[str, str]]]]:
+    if isinstance(connection, sqlite3.Connection):
+        return _sqlite_schema_tables(connection)
+    return _postgres_schema_tables(connection)
+
+
+def _sqlite_schema_tables(connection: sqlite3.Connection) -> list[tuple[str, list[tuple[str, str]]]]:
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    table_names = [row[0] for row in cursor.fetchall()]
+    tables = []
+    for table_name in table_names:
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        columns = [(row[1], row[2]) for row in cursor.fetchall()]
+        tables.append((table_name, columns))
+    return tables
+
+
+def _postgres_schema_tables(connection: Any) -> list[tuple[str, list[tuple[str, str]]]]:
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT table_name, column_name, data_type "
+        "FROM information_schema.columns "
+        "WHERE table_schema = 'public' "
+        "ORDER BY table_name, ordinal_position"
+    )
+    tables: list[tuple[str, list[tuple[str, str]]]] = []
+    by_table: dict[str, list[tuple[str, str]]] = {}
+    for table_name, column_name, data_type in cursor.fetchall():
+        if table_name not in by_table:
+            by_table[table_name] = []
+            tables.append((table_name, by_table[table_name]))
+        by_table[table_name].append((column_name, data_type))
+    return tables
 
 
 def _run_schema(connection_name: str, resolver: Callable[[str], str]) -> str:
     url = resolver(connection_name)
-    kind = _kind_from_url(url)
-    if kind == "sqlite":
-        tables = _sqlite_schema(url)
-    else:
-        tables = _postgres_schema(url)
+    connection = _open(url)
+    try:
+        tables = _schema(connection)
+    finally:
+        connection.close()
     return _render_schema(tables)
 
 

@@ -197,6 +197,38 @@ def test_cli_brief_recursion_guard_prints_nothing(
     assert result.output == ""
 
 
+def test_slow_gatherer_does_not_delay_the_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold/slow gatherer gets its own small cap; it never eats into the
+    model call's share of the budget, and a timed-out gather falls back to
+    an empty context rather than blocking the whole brief."""
+    monkeypatch.setattr(brief_module, "_GATHER_BUDGET_SECONDS", 0.05)
+    captured: dict[str, float | str] = {}
+
+    def slow_gather(prompt: str, cwd: str) -> GatheredContext:
+        time.sleep(0.3)
+        return GatheredContext(memories=["late memory"], glossary=[], likely_files=[])
+
+    def fast_model_runner(system: str, user: str, timeout: float) -> str:
+        captured["timeout"] = timeout
+        captured["user"] = user
+        return "Goal: x.\nNot the goal: y.\nLikely files: z.\nSkills to run: none."
+
+    start = time.perf_counter()
+    result = make_brief(
+        _TASK_PROMPT,
+        cwd="/repo",
+        gather=slow_gather,
+        model_runner=fast_model_runner,
+        budget_seconds=1.0,
+    )
+    elapsed = time.perf_counter() - start
+
+    assert result == "Goal: x.\nNot the goal: y.\nLikely files: z.\nSkills to run: none."
+    assert elapsed < 0.3, "make_brief must not wait for the slow gatherer to finish"
+    assert captured["timeout"] == pytest.approx(0.95, abs=0.02)
+    assert "late memory" not in str(captured["user"])
+
+
 def test_gather_names_files_by_whole_name_not_by_prose_fragments(tmp_path: Path) -> None:
     """A code-like word matches a folder or file stem; a prose word never matches
     a file just because its letters appear inside a longer path."""

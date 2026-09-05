@@ -287,7 +287,7 @@ def remove_all(settings_path: Path, runner: Runner, workspace_dir: Path) -> list
 
     Removes the managed agent switch, uninstalls the plugin (always
     attempted — it is a no-op if it was never installed), and deletes only
-    `workspace_dir / "code_tools"`, the read cache: never the rest of the
+    `workspace_dir / "code_tools"`, the tool state: never the rest of the
     workspace, and never a `.claude` folder. Returns what it removed.
     """
     removed: list[str] = []
@@ -301,7 +301,7 @@ def remove_all(settings_path: Path, runner: Runner, workspace_dir: Path) -> list
     code_tools_dir = workspace_dir / "code_tools"
     if code_tools_dir.exists():
         shutil.rmtree(code_tools_dir)
-        removed.append("read cache")
+        removed.append("tool state")
 
     return removed
 
@@ -340,7 +340,7 @@ def code_agent_off() -> None:
 
 @code_agent_group.command("remove")
 def code_agent_remove() -> None:
-    """Undo the agent switch, uninstall the plugin, and clear its read cache."""
+    """Undo the agent switch, uninstall the plugin, and clear its tool state."""
     from headroom.paths import workspace_dir
 
     settings_path = claude_user_settings_path()
@@ -369,7 +369,7 @@ def _skills_ensure_runner(argv: list[str]) -> None:
     commands -- a broken network or a missing binary must never stop a
     session from starting.
     """
-    result = run(argv, capture_output=True, text=True, timeout=120)
+    result = run(argv, capture_output=True, text=True, timeout=25)
     if result.returncode != 0:
         detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
         raise RuntimeError(detail or f"exit code {result.returncode}")

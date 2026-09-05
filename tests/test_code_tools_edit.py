@@ -285,7 +285,7 @@ def test_edit_tool_is_registered() -> None:
     ]
     for field in ["path", "old", "new", "all", "edits", "content", "overwrite", "to"]:
         assert field in schema["properties"]
-    assert len(edit_tool.kwargs["description"].split()) < 120
+    assert len(edit_tool.kwargs["description"].split()) < 60
 
 
 def test_handle_edit_create_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

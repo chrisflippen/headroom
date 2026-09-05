@@ -492,3 +492,35 @@ def test_importers_finds_importing_files_but_not_unrelated(tmp_path: Path) -> No
     assert result == (
         "b.py:\n  1: from src.helper import do_thing\nc.py:\n  1: import src.helper as h"
     )
+
+
+def test_importers_searches_the_worktree_containing_the_target(tmp_path: Path) -> None:
+    import subprocess
+
+    main_checkout = tmp_path / "main"
+    main_checkout.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=main_checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=main_checkout, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=main_checkout, check=True)
+    (main_checkout / "README.md").write_text("hello")
+    subprocess.run(["git", "add", "README.md"], cwd=main_checkout, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=main_checkout, check=True)
+
+    worktree_dir = tmp_path / "feature-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "feature", str(worktree_dir)],
+        cwd=main_checkout,
+        check=True,
+    )
+    (worktree_dir / "src").mkdir()
+    (worktree_dir / "src" / "helper.py").write_text("def do_thing():\n    pass\n")
+    (worktree_dir / "b.py").write_text("from src.helper import do_thing\n")
+
+    result = search(
+        {"action": "importers", "path": str(worktree_dir / "src" / "helper.py")},
+        root=main_checkout,
+    )
+
+    assert result == "b.py:\n  1: from src.helper import do_thing"

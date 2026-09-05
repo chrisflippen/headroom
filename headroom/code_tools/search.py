@@ -694,11 +694,12 @@ def _handle_importers(request: dict[str, Any], root: Path) -> str:
     if not resolved.exists():
         return f"error: file not found: {raw_path}"
 
+    effective_root = root_containing(resolved, root)
     target_rel = display_path(resolved, root)
     stem, dotted = _module_forms(target_rel)
     pattern = _importers_pattern(stem, dotted)
 
-    matches, error = _grep_matches(root, pattern, ".", None, 0)
+    matches, error = _grep_matches(effective_root, pattern, ".", None, 0)
     if error is not None:
         return error
     matches = [m for m in matches if m[0] != target_rel]

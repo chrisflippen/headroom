@@ -4,17 +4,42 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from headroom.proxy.session_tool_store import SessionToolStore
 
 
 class SessionToolTracker:
-    """Bounded LRU tracker recording per-session memory-tool injection state."""
+    """Bounded LRU tracker recording per-session memory-tool injection state.
 
-    def __init__(self, max_sessions: int) -> None:
+    When constructed with a `store`, the tracker hydrates its in-memory
+    state from it (most recent `max_sessions` sessions, in last-seen
+    order) and write-throughs every `record_injection` call. The store is
+    optional and purely additive: with none given, behavior is identical
+    to the original pure in-memory tracker.
+    """
+
+    def __init__(self, max_sessions: int, store: SessionToolStore | None = None) -> None:
         if max_sessions <= 0:
             raise ValueError("max_sessions must be > 0")
         self._max_sessions: int = max_sessions
         self._lock = threading.RLock()
+        self._store = store
         self._sessions: OrderedDict[tuple[str, str], OrderedDict[str, bytes]] = OrderedDict()
+        if store is not None:
+            self._hydrate(store)
+
+    def _hydrate(self, store: SessionToolStore) -> None:
+        for provider, session_id, tools in store.load_all_memory_tools(self._max_sessions):
+            if not tools:
+                continue
+            entry: OrderedDict[str, bytes] = OrderedDict()
+            for tool_name, golden_bytes in tools:
+                entry[tool_name] = golden_bytes
+            self._sessions[self._key(provider, session_id)] = entry
+        while len(self._sessions) > self._max_sessions:
+            self._sessions.popitem(last=False)
 
     @property
     def active_sessions(self) -> int:
@@ -80,11 +105,22 @@ class SessionToolTracker:
             if entry is None:
                 entry = OrderedDict()
                 self._sessions[key] = entry
-            if tool_name not in entry:
+            is_new = tool_name not in entry
+            position = len(entry)
+            if is_new:
                 entry[tool_name] = tool_definition_bytes
             self._sessions.move_to_end(key)
             while len(self._sessions) > self._max_sessions:
                 self._sessions.popitem(last=False)
+            if is_new and self._store is not None:
+                self._store.record_memory_tool(
+                    provider=provider,
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    golden_bytes=tool_definition_bytes,
+                    position=position,
+                    max_sessions=self._max_sessions,
+                )
 
     def reset(self) -> None:
         """Clear all session state."""

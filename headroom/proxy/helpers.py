@@ -87,6 +87,7 @@ from headroom.proxy.memory_golden_policy import (
     replay_golden_memory_tool_definition,
     serialize_memory_tool_definition_canonical,
 )
+from headroom.proxy.session_tool_store import SessionToolStore
 from headroom.proxy.tool_definition_serialization import (
     serialize_tool_definition_canonical as _serialize_tool_definition_canonical,
 )
@@ -2030,10 +2031,29 @@ def serialize_tool_definition_canonical(tool_definition: dict[str, Any]) -> byte
 class SessionToolTracker(_SessionToolTracker):
     """Env-aware compatibility wrapper for the pure session tool tracker."""
 
-    def __init__(self, max_sessions: int | None = None) -> None:
+    def __init__(
+        self,
+        max_sessions: int | None = None,
+        store: SessionToolStore | None = None,
+    ) -> None:
         if max_sessions is None:
             max_sessions = get_tool_tracker_max_sessions()
-        super().__init__(max_sessions=max_sessions)
+        super().__init__(max_sessions=max_sessions, store=store)
+
+
+def _open_default_session_tool_store() -> SessionToolStore | None:
+    """Open the process-default session tool store, unless stateless.
+
+    Stateless processes (`headroom.paths.process_is_stateless()`) must
+    never write to the workspace, so they get a memory-only tracker —
+    identical to the pre-persistence behavior. Any failure to open the
+    store (unwritable dir, corrupt file, ...) is handled inside
+    `SessionToolStore` itself: it logs one warning and falls back to an
+    unusable-but-non-raising connection, so this never raises either.
+    """
+    if _paths.process_is_stateless():
+        return None
+    return SessionToolStore()
 
 
 # Process-wide singleton. Lazily replaced by tests via
@@ -2046,13 +2066,15 @@ def get_session_tool_tracker() -> SessionToolTracker:
     """Return the process-wide `SessionToolTracker` singleton.
 
     Lazily constructed so the env-var bound
-    (`HEADROOM_TOOL_TRACKER_MAX_SESSIONS`) is honored at first use.
-    Tests use ``_reset_session_tool_tracker_for_test``.
+    (`HEADROOM_TOOL_TRACKER_MAX_SESSIONS`) is honored at first use, and
+    backed by a SQLite store (`session_tools.db` in the workspace dir)
+    so sticky-injection state survives a proxy restart. Tests use
+    ``_reset_session_tool_tracker_for_test``.
     """
     global _session_tool_tracker
     with _session_tool_tracker_lock:
         if _session_tool_tracker is None:
-            _session_tool_tracker = SessionToolTracker()
+            _session_tool_tracker = SessionToolTracker(store=_open_default_session_tool_store())
         return _session_tool_tracker
 
 
@@ -2305,10 +2327,14 @@ def apply_session_sticky_memory_tools(
 class SessionCcrTracker(_SessionCcrTracker):
     """Env-aware compatibility wrapper for the pure CCR session tracker."""
 
-    def __init__(self, max_sessions: int | None = None) -> None:
+    def __init__(
+        self,
+        max_sessions: int | None = None,
+        store: SessionToolStore | None = None,
+    ) -> None:
         if max_sessions is None:
             max_sessions = get_tool_tracker_max_sessions()
-        super().__init__(max_sessions=max_sessions)
+        super().__init__(max_sessions=max_sessions, store=store)
 
 
 # Process-wide singleton.
@@ -2317,11 +2343,17 @@ _session_ccr_tracker: SessionCcrTracker | None = None
 
 
 def get_session_ccr_tracker() -> SessionCcrTracker:
-    """Return the process-wide :class:`SessionCcrTracker` singleton."""
+    """Return the process-wide :class:`SessionCcrTracker` singleton.
+
+    Backed by the same SQLite store convention as
+    `get_session_tool_tracker` (`session_tools.db` in the workspace
+    dir; memory-only when the process is stateless) so sticky CCR
+    tool-injection state survives a proxy restart.
+    """
     global _session_ccr_tracker
     with _session_ccr_tracker_lock:
         if _session_ccr_tracker is None:
-            _session_ccr_tracker = SessionCcrTracker()
+            _session_ccr_tracker = SessionCcrTracker(store=_open_default_session_tool_store())
         return _session_ccr_tracker
 
 

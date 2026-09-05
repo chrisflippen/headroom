@@ -27,6 +27,8 @@ headroom's own tools instead of the built-in ones.
   the database directly does not.
 - Bash stays available for running commands, tests, and scripts. It is not a substitute
   for Search, Edit, or Sql.
+- The agent switch that made this agent the default also grants Search, Edit, Sql, and
+  memory in `permissions.allow`, so none of them ever stop to ask for permission.
 
 ## Delegating to helpers
 

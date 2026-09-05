@@ -21,7 +21,6 @@ Usage:
 Exit codes: 0 = fresh, 1 = drift or stale found, 2 = a page is missing its
 freshness block or a probe command failed (fix the page, don't ignore it).
 """
-
 import re
 import subprocess
 import sys
@@ -31,9 +30,7 @@ from pathlib import Path
 REFS = Path(__file__).parent / "references"
 STALE_DAYS = 60
 
-BLOCK_RE = re.compile(
-    r"<!-- freshness verified=(\d{4}-\d{2}-\d{2}) baseline=(\d{4}-\d{2}-\d{2}) -->"
-)
+BLOCK_RE = re.compile(r"<!-- freshness verified=(\d{4}-\d{2}-\d{2}) baseline=(\d{4}-\d{2}-\d{2}) -->")
 # The command field may itself contain " | " (curl ... | python3 ...), so the
 # name is everything before the FIRST separator and 'seen' everything after the
 # LAST one: lazy first group, greedy middle.
@@ -79,22 +76,16 @@ def main():
     for p in pages:
         meta = parse(p)
         if meta is None:
-            broken.append(
-                f"{p.name}: MISSING freshness block — add one before relying on this page"
-            )
+            broken.append(f"{p.name}: MISSING freshness block — add one before relying on this page")
             continue
         age = (today - meta["verified"]).days
         if age > STALE_DAYS:
-            stale.append(
-                f"{p.name}: verified {meta['verified']} ({age} days ago, threshold {STALE_DAYS})"
-            )
+            stale.append(f"{p.name}: verified {meta['verified']} ({age} days ago, threshold {STALE_DAYS})")
         if mode == "--sweep" or p.stem in targets:
             for name, cmd, seen in meta["probes"]:
                 cur = run_probe(cmd)
                 if not cur:
-                    broken.append(
-                        f"{p.name}: probe '{name}' returned nothing — command broken or offline"
-                    )
+                    broken.append(f"{p.name}: probe '{name}' returned nothing — command broken or offline")
                 elif cur != seen:
                     tag = " MAJOR" if major(cur) != major(seen) else ""
                     drift.append(f"{p.name}: {name} {seen} -> {cur}{tag}")

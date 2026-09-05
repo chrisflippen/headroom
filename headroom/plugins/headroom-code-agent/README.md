@@ -27,7 +27,11 @@ instead, so headroom can shrink what the model sees before it lands in context.
 
 `headroom wrap claude` writes the managed setting that makes the code agent the
 default agent for a session. It only touches entries headroom itself wrote — anything
-you set yourself is left alone.
+you set yourself is left alone. The switch also grants `Search`, `Edit`, `Sql`, and
+headroom's own compression tools in `permissions.allow`, so the agent never prompts
+for permission on its own reads, edits, or queries; memory calls never prompt either,
+since they're injected straight into requests rather than run as a permission-checked
+tool.
 
 ## Removing it
 

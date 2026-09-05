@@ -40,6 +40,12 @@ def _offenders() -> list[str]:
     for path in _PACKAGE.rglob("*.py"):
         if path.name in _SKIP:
             continue
+        # headroom/plugins/ ships shipped skill files verbatim from
+        # Christopher's ~/.claude/skills/ -- they are not headroom code and
+        # must stay byte-identical copies of the source, so this check does
+        # not apply to them.
+        if "plugins" in path.relative_to(_PACKAGE).parts:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not _is_raw_subprocess_call(node):

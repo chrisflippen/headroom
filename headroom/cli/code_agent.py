@@ -55,6 +55,40 @@ _MARKETPLACE_NAME = "headroom-code-agent-marketplace"
 _PLUGIN_NAME = "headroom-code-agent"
 _MANAGED_KEY = "_headroom_managed"
 _AGENT_KEY = "agent"
+_PERMISSIONS_KEY = "permissions"
+_ALLOW_KEY = "allow"
+_PERMISSIONS_ADDED_KEY = "permissions_added"
+
+# Ruling (Christopher, 2026-09-05): the agent switch also grants the code
+# agent's own tools in `permissions.allow`, since `permissions.defaultMode =
+# acceptEdits` (Christopher's setting) does not cover MCP tools -- without
+# this every one of these calls prompts for permission. Each group below is
+# a managed entry: `ensure_agent_switch` adds only the rules not already
+# there and records exactly those under `_headroom_managed.permissions_added`,
+# so `off`/`remove` take out only what headroom itself added and leave a
+# rule alone if the user already had it.
+CODE_AGENT_ALLOW_RULES: tuple[str, ...] = (
+    # The code agent's own file, edit, and database tools on the headroom
+    # MCP server -- what the agent uses instead of the built-in Read, Edit,
+    # Write, Grep, and Glob.
+    "mcp__headroom__Search",
+    "mcp__headroom__Edit",
+    "mcp__headroom__Sql",
+    # Headroom's own compression tools, on the same MCP server: compress
+    # content on demand, retrieve original content behind a "[Retrieve
+    # more: hash=...]" marker, and read session compression stats.
+    "mcp__headroom__headroom_compress",
+    "mcp__headroom__headroom_retrieve",
+    "mcp__headroom__headroom_stats",
+    # No memory rule: for Claude Code, `memory_search`/`memory_save` are
+    # injected straight into each request by the proxy (see
+    # `headroom.proxy.memory_tool_adapter`), not registered as an MCP
+    # server -- `~/.claude.json` only ever gets a "headroom" MCP entry
+    # (`_setup_headroom_mcp` in `headroom/cli/wrap.py`), and
+    # `_inject_memory_mcp_config` only ever writes Codex's `config.toml`.
+    # There is no `mcp__headroom_memory__*` tool name for Claude Code to
+    # prompt on, so there is nothing to add here.
+)
 
 # A runner takes one `claude ...` argv list and does something with it (run
 # it for real, or record it in a test). Pure functions build the argv and
@@ -94,6 +128,58 @@ def _managed_agent_entry(payload: dict[str, Any]) -> dict[str, Any] | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _add_allow_rules(payload: dict[str, Any]) -> list[str]:
+    """Add any of CODE_AGENT_ALLOW_RULES missing from permissions.allow.
+
+    Returns only the rules this call actually added -- never a rule that
+    was already there, whether the user set it or a previous run of this
+    same function did. Existing entries are never reordered or dropped.
+    """
+    permissions = payload.get(_PERMISSIONS_KEY)
+    if not isinstance(permissions, dict):
+        permissions = {}
+    allow = permissions.get(_ALLOW_KEY)
+    if not isinstance(allow, list):
+        allow = []
+
+    added: list[str] = []
+    for rule in CODE_AGENT_ALLOW_RULES:
+        if rule not in allow:
+            allow.append(rule)
+            added.append(rule)
+
+    permissions[_ALLOW_KEY] = allow
+    payload[_PERMISSIONS_KEY] = permissions
+    return added
+
+
+def _remove_allow_rules(payload: dict[str, Any], rules: list[str]) -> None:
+    """Remove exactly `rules` from permissions.allow, dropping empty keys.
+
+    `rules` is what `_add_allow_rules` recorded as added -- a rule the user
+    already had (so never recorded) is never touched here.
+    """
+    if not rules:
+        return
+    permissions = payload.get(_PERMISSIONS_KEY)
+    if not isinstance(permissions, dict):
+        return
+    allow = permissions.get(_ALLOW_KEY)
+    if not isinstance(allow, list):
+        return
+
+    remaining = [rule for rule in allow if rule not in rules]
+    if remaining:
+        permissions[_ALLOW_KEY] = remaining
+    else:
+        permissions.pop(_ALLOW_KEY, None)
+
+    if permissions:
+        payload[_PERMISSIONS_KEY] = permissions
+    else:
+        payload.pop(_PERMISSIONS_KEY, None)
+
+
 # ---------------------------------------------------------------------------
 # 1-2. The agent switch itself.
 # ---------------------------------------------------------------------------
@@ -108,6 +194,12 @@ def ensure_agent_switch(settings_path: Path, agent: str = DEFAULT_AGENT) -> bool
     write (for example a stale value left behind by an uninstalled plugin).
     The prior value is remembered in the managed marker's `previous` field
     so `remove_agent_switch` can restore it later.
+
+    Also grants CODE_AGENT_ALLOW_RULES in `permissions.allow`, so the code
+    agent's own tools never prompt for permission under
+    `permissions.defaultMode = acceptEdits` (which does not cover MCP
+    tools). Only the rules actually added are recorded, under
+    `_headroom_managed.permissions_added`.
     """
     payload = _read_settings(settings_path)
     current = payload.get(_AGENT_KEY)
@@ -118,10 +210,13 @@ def ensure_agent_switch(settings_path: Path, agent: str = DEFAULT_AGENT) -> bool
 
     previous = managed.get("previous") if managed is not None else current
     payload[_AGENT_KEY] = agent
+    added_rules = _add_allow_rules(payload)
+
     managed_all = payload.get(_MANAGED_KEY)
     if not isinstance(managed_all, dict):
         managed_all = {}
     managed_all[_AGENT_KEY] = {"previous": previous}
+    managed_all[_PERMISSIONS_ADDED_KEY] = added_rules
     payload[_MANAGED_KEY] = managed_all
 
     _write_settings(settings_path, payload)
@@ -131,7 +226,9 @@ def ensure_agent_switch(settings_path: Path, agent: str = DEFAULT_AGENT) -> bool
 def remove_agent_switch(settings_path: Path) -> bool:
     """Remove the managed `agent` entry, restoring the value it replaced.
 
-    A user-set `agent` value (one headroom never wrote) is left alone.
+    A user-set `agent` value (one headroom never wrote) is left alone. Also
+    removes exactly the `permissions.allow` rules `ensure_agent_switch`
+    recorded as its own -- a rule the user already had before is untouched.
     """
     payload = _read_settings(settings_path)
     managed = _managed_agent_entry(payload)
@@ -145,8 +242,12 @@ def remove_agent_switch(settings_path: Path) -> bool:
         payload[_AGENT_KEY] = previous
 
     managed_all = payload.get(_MANAGED_KEY)
+    added_rules = managed_all.get(_PERMISSIONS_ADDED_KEY) if isinstance(managed_all, dict) else None
+    _remove_allow_rules(payload, added_rules if isinstance(added_rules, list) else [])
+
     if isinstance(managed_all, dict):
         managed_all.pop(_AGENT_KEY, None)
+        managed_all.pop(_PERMISSIONS_ADDED_KEY, None)
         if managed_all:
             payload[_MANAGED_KEY] = managed_all
         else:
@@ -157,7 +258,11 @@ def remove_agent_switch(settings_path: Path) -> bool:
 
 
 def agent_switch_state(settings_path: Path) -> str:
-    """Return "off" or "on" (was: <prior agent>, if headroom replaced one)."""
+    """Return "off", "on (N allow rules)", or "on (was: X; N allow rules)".
+
+    N is how many `permissions.allow` rules `ensure_agent_switch` added --
+    see CODE_AGENT_ALLOW_RULES.
+    """
     payload = _read_settings(settings_path)
     current = payload.get(_AGENT_KEY)
     if current is None:
@@ -165,10 +270,17 @@ def agent_switch_state(settings_path: Path) -> str:
     managed = _managed_agent_entry(payload)
     if managed is None:
         return f"user-set:{current}"
+
+    managed_all = payload.get(_MANAGED_KEY)
+    added_rules = managed_all.get(_PERMISSIONS_ADDED_KEY) if isinstance(managed_all, dict) else None
+    rule_count = len(added_rules) if isinstance(added_rules, list) else 0
+    plural = "" if rule_count == 1 else "s"
+    rules_note = f"{rule_count} allow rule{plural}"
+
     previous = managed.get("previous")
     if previous is not None:
-        return f"on (was: {previous})"
-    return "on"
+        return f"on (was: {previous}; {rules_note})"
+    return f"on ({rules_note})"
 
 
 # ---------------------------------------------------------------------------

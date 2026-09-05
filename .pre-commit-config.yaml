@@ -26,19 +26,27 @@ repos:
         # botched conflict resolution from a rebase). CI re-checks this
         # unconditionally, so installing hooks is not required for enforcement.
         args: [--assume-in-merge]
+        # headroom/plugins/ ships skill files verbatim from Christopher's own
+        # ~/.claude/skills/ -- excluded so this hook never flags conflict-
+        # marker-shaped text in a skill's own docs as a real conflict.
+        exclude: ^headroom/plugins/
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.3
     hooks:
       - id: ruff
         args: [--fix]
-        exclude: ^experiments/
+        exclude: ^(experiments|headroom/plugins)/
       - id: ruff-format
-        exclude: ^experiments/
+        exclude: ^(experiments|headroom/plugins)/
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.14.1
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]
-        exclude: ^experiments/
+        # `entry: mypy headroom` + pass_filenames: false means this hook
+        # always runs the whole-package command regardless of `exclude` --
+        # the real exclusion is `[tool.mypy] exclude` in pyproject.toml.
+        # Kept here too so the hook's own config states the same thing.
+        exclude: ^(experiments|headroom/plugins)/
         pass_filenames: false
         entry: mypy headroom

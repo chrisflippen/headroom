@@ -47,15 +47,85 @@ def test_ensure_agent_switch_preserves_unrelated_keys(tmp_path: Path) -> None:
     original = {
         "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": "echo hi"}]}]},
         "env": {"SOME_KEY": "some-value"},
-        "permissions": {"allow": ["Bash(git *)"]},
+        "permissions": {"allow": ["Bash(git *)"], "deny": ["Bash(rm *)"]},
     }
     settings_path.write_text(json.dumps(original, indent=2) + "\n")
 
     code_agent.ensure_agent_switch(settings_path)
 
     payload = json.loads(settings_path.read_text())
-    for key, value in original.items():
-        assert payload[key] == value
+    assert payload["hooks"] == original["hooks"]
+    assert payload["env"] == original["env"]
+    # permissions.allow is the one key ensure_agent_switch touches (it grants
+    # the code agent's own tools) -- the existing rule stays first, the new
+    # ones are appended after it, nothing is reordered or dropped.
+    assert payload["permissions"]["deny"] == ["Bash(rm *)"]
+    assert payload["permissions"]["allow"] == [
+        "Bash(git *)",
+        "mcp__headroom__Search",
+        "mcp__headroom__Edit",
+        "mcp__headroom__Sql",
+        "mcp__headroom__headroom_compress",
+        "mcp__headroom__headroom_retrieve",
+        "mcp__headroom__headroom_stats",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# ensure_agent_switch: permissions.allow rules for the code agent's own tools
+# ---------------------------------------------------------------------------
+
+_EXPECTED_ALLOW_RULES = [
+    "mcp__headroom__Search",
+    "mcp__headroom__Edit",
+    "mcp__headroom__Sql",
+    "mcp__headroom__headroom_compress",
+    "mcp__headroom__headroom_retrieve",
+    "mcp__headroom__headroom_stats",
+]
+
+
+def test_ensure_agent_switch_adds_permissions_key_when_absent(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+
+    code_agent.ensure_agent_switch(settings_path)
+
+    payload = json.loads(settings_path.read_text())
+    assert payload["permissions"]["allow"] == _EXPECTED_ALLOW_RULES
+    assert payload["_headroom_managed"]["permissions_added"] == _EXPECTED_ALLOW_RULES
+
+
+def test_ensure_agent_switch_adds_the_allow_rules_only_once(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+    first_bytes = settings_path.read_bytes()
+
+    changed = code_agent.ensure_agent_switch(settings_path)
+
+    assert changed is False
+    assert settings_path.read_bytes() == first_bytes
+
+
+def test_ensure_agent_switch_does_not_duplicate_a_pre_existing_allow_rule(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"permissions": {"allow": ["mcp__headroom__Search"]}}) + "\n"
+    )
+
+    code_agent.ensure_agent_switch(settings_path)
+
+    payload = json.loads(settings_path.read_text())
+    assert payload["permissions"]["allow"] == _EXPECTED_ALLOW_RULES
+    # Only the five rules that were not already there were newly added.
+    assert payload["_headroom_managed"]["permissions_added"] == [
+        "mcp__headroom__Edit",
+        "mcp__headroom__Sql",
+        "mcp__headroom__headroom_compress",
+        "mcp__headroom__headroom_retrieve",
+        "mcp__headroom__headroom_stats",
+    ]
 
 
 def test_ensure_agent_switch_takes_over_a_user_set_agent(tmp_path: Path) -> None:
@@ -98,7 +168,7 @@ def test_agent_switch_state_on_after_ensure(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on"
+    assert code_agent.agent_switch_state(settings_path) == "on (6 allow rules)"
 
 
 def test_agent_switch_state_reports_user_set_value(tmp_path: Path) -> None:
@@ -115,7 +185,7 @@ def test_agent_switch_state_reports_the_taken_over_value(tmp_path: Path) -> None
     settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free)"
+    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 6 allow rules)"
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +203,33 @@ def test_remove_agent_switch_removes_managed_entry(tmp_path: Path) -> None:
     payload = json.loads(settings_path.read_text())
     assert "agent" not in payload
     assert "_headroom_managed" not in payload
+
+
+def test_remove_agent_switch_removes_exactly_the_added_allow_rules(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    code_agent.ensure_agent_switch(settings_path)
+
+    code_agent.remove_agent_switch(settings_path)
+
+    payload = json.loads(settings_path.read_text())
+    # Every rule it added is gone, and it created the permissions key from
+    # nothing, so the whole key is gone too rather than left as `{}`.
+    assert "permissions" not in payload
+
+
+def test_remove_agent_switch_leaves_a_pre_existing_user_allow_rule_alone(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"permissions": {"allow": ["mcp__headroom__Search"]}}) + "\n"
+    )
+    code_agent.ensure_agent_switch(settings_path)
+
+    code_agent.remove_agent_switch(settings_path)
+
+    payload = json.loads(settings_path.read_text())
+    assert payload["permissions"]["allow"] == ["mcp__headroom__Search"]
 
 
 def test_remove_agent_switch_restores_previous_value(tmp_path: Path) -> None:

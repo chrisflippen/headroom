@@ -1,0 +1,29 @@
+{
+  "name": "headroom-code-agent-marketplace",
+  "owner": {
+    "name": "Headroom Contributors"
+  },
+  "metadata": {
+    "description": "Marketplace shipped inside the headroom-ai package for its own code agent plugin.",
+    "version": "0.37.0"
+  },
+  "plugins": [
+    {
+      "name": "headroom-code-agent",
+      "source": "./headroom-code-agent",
+      "description": "Headroom's code agent: a Claude Code main-thread agent that reaches files and databases only through headroom's Search, Edit, and Sql tools.",
+      "version": "0.37.0",
+      "author": {
+        "name": "Headroom Contributors",
+        "url": "https://github.com/headroomlabs-ai/headroom"
+      },
+      "homepage": "https://github.com/headroomlabs-ai/headroom",
+      "repository": "https://github.com/headroomlabs-ai/headroom",
+      "keywords": [
+        "headroom",
+        "code-agent",
+        "claude-code"
+      ]
+    }
+  ]
+}

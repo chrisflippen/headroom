@@ -407,7 +407,7 @@ def test_hook_main_exits_two_with_findings_and_the_fix_now_message(tmp_path: Pat
 # 10. Plugin wiring: hooks.json has both PostToolUse matchers.
 # ---------------------------------------------------------------------------
 
-_PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "headroom-code-agent"
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "headroom" / "plugins" / "headroom-code-agent"
 
 
 def test_plugin_hooks_json_wires_post_tool_use_for_both_edit_paths() -> None:

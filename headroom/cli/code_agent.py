@@ -31,6 +31,7 @@ from typing import Any
 
 import click
 
+import headroom
 from headroom import fsutil
 from headroom._subprocess import run
 from headroom.code_tools import brief, skills_ensure
@@ -50,9 +51,8 @@ from .main import main
 # The full name Claude Code expects for a plugin agent: "<plugin>:<agent>".
 DEFAULT_AGENT = "headroom-code-agent:code"
 
-_MARKETPLACE_NAME = "headroom-marketplace"
+_MARKETPLACE_NAME = "headroom-code-agent-marketplace"
 _PLUGIN_NAME = "headroom-code-agent"
-_FORK_SOURCE = "chrisflippen/headroom"
 _MANAGED_KEY = "_headroom_managed"
 _AGENT_KEY = "agent"
 
@@ -102,16 +102,17 @@ def _managed_agent_entry(payload: dict[str, Any]) -> dict[str, Any] | None:
 def ensure_agent_switch(settings_path: Path, agent: str = DEFAULT_AGENT) -> bool:
     """Set `agent` in the user settings file, marking it as headroom-managed.
 
-    Returns True when the file changed. If the user already has a different
-    `agent` value that headroom did not write, that value is left alone and
-    this returns False — use `agent_switch_state` to see the conflict.
+    Returns True when the file changed. Ruling (Christopher, 2026-09-05):
+    headroom always takes over the agent switch, even when the user's
+    settings already hold a different `agent` value that headroom did not
+    write (for example a stale value left behind by an uninstalled plugin).
+    The prior value is remembered in the managed marker's `previous` field
+    so `remove_agent_switch` can restore it later.
     """
     payload = _read_settings(settings_path)
     current = payload.get(_AGENT_KEY)
     managed = _managed_agent_entry(payload)
 
-    if current is not None and managed is None:
-        return False
     if current == agent and managed is not None:
         return False
 
@@ -156,14 +157,18 @@ def remove_agent_switch(settings_path: Path) -> bool:
 
 
 def agent_switch_state(settings_path: Path) -> str:
-    """Return "off", "on", or "user-set:<name>" for the current agent switch."""
+    """Return "off" or "on" (was: <prior agent>, if headroom replaced one)."""
     payload = _read_settings(settings_path)
     current = payload.get(_AGENT_KEY)
     if current is None:
         return "off"
-    if _managed_agent_entry(payload) is not None:
-        return "on"
-    return f"user-set:{current}"
+    managed = _managed_agent_entry(payload)
+    if managed is None:
+        return f"user-set:{current}"
+    previous = managed.get("previous")
+    if previous is not None:
+        return f"on (was: {previous})"
+    return "on"
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +225,14 @@ class LaunchPlan:
 def launch_plan(claude_args: Sequence[str], cwd: Path, settings_path: Path) -> LaunchPlan:
     """Decide the `--agent` launch args and warning for one `wrap claude` run.
 
-    Call this after `ensure_agent_switch(settings_path)` has already run, so
-    `settings_path` reflects the switch's current state. If the user already
-    had their own `agent` value in the user settings file (the "user-set"
-    state `ensure_agent_switch` leaves alone), the launch uses that agent
-    rather than silently overriding it with headroom's own default. A
-    project's own `.claude/settings.json` or `settings.local.json` `agent`
-    key is never rewritten — Claude Code's own settings precedence, not this
+    Call this after `ensure_agent_switch(settings_path)` has already run.
+    Ruling (Christopher, 2026-09-05): headroom's agent switch always takes
+    over, so this always injects `DEFAULT_AGENT` unless the caller passed
+    `--agent` explicitly on the command line. `settings_path` is accepted
+    for interface stability (callers already pass it, and it may be used
+    again if a future override needs it) but is not read here. A project's
+    own `.claude/settings.json` or `settings.local.json` `agent` key is
+    never rewritten — Claude Code's own settings precedence, not this
     decision, is what makes the project's value win at runtime, so this only
     warns about the conflict, never changes the args because of it.
     """
@@ -239,9 +245,7 @@ def launch_plan(claude_args: Sequence[str], cwd: Path, settings_path: Path) -> L
 
     args = tuple(claude_args)
     if "--agent" not in args:
-        state = agent_switch_state(settings_path)
-        agent = state.split(":", 1)[1] if state.startswith("user-set:") else DEFAULT_AGENT
-        args = (*agent_launch_args(agent), *args)
+        args = (*agent_launch_args(DEFAULT_AGENT), *args)
 
     return LaunchPlan(args=args, warning=warning)
 
@@ -251,38 +255,29 @@ def launch_plan(claude_args: Sequence[str], cwd: Path, settings_path: Path) -> L
 # ---------------------------------------------------------------------------
 
 
-def _local_checkout_source() -> str | None:
-    """The repo root, if this code is running from a local git checkout."""
-    repo_root = Path(__file__).resolve().parents[2]
-    if (repo_root / ".claude-plugin" / "marketplace.json").exists():
-        return str(repo_root)
-    return None
-
-
 def marketplace_source() -> str:
-    """Where to add the headroom marketplace from.
+    """Where to add the code agent's own marketplace from.
 
     `HEADROOM_MARKETPLACE_SOURCE` wins if set (matches `headroom init`'s
-    override). A local checkout of the repo wins next. Otherwise this is the
-    fork, `chrisflippen/headroom`.
+    override, and lets a test or a local checkout point elsewhere).
+    Otherwise this is the `plugins` directory shipped inside the installed
+    `headroom` package itself — maturin ships everything under `headroom/`
+    in the wheel, so the plugin travels with the binary and never depends on
+    a separate git checkout or fork existing on the machine.
     """
     override = os.environ.get("HEADROOM_MARKETPLACE_SOURCE")
     if override:
         return override
-    local = _local_checkout_source()
-    if local is not None:
-        return local
-    return _FORK_SOURCE
+    return str(Path(headroom.__file__).resolve().parent / "plugins")
 
 
 def install_plugin(runner: Runner, source: str) -> None:
-    """Replace a stale marketplace entry, then install the code agent plugin.
+    """Add the code agent's own marketplace, then install the plugin from it.
 
-    Three `claude` calls in order: drop whatever `headroom-marketplace`
-    currently points at, add it back pointing at `source`, then install the
-    plugin for the current user.
+    This only ever adds/uses `_MARKETPLACE_NAME` (the code agent's own
+    shipped marketplace) — it never touches `headroom-marketplace`, which
+    belongs to the separate hooks plugin and is managed by `headroom init`.
     """
-    runner(["claude", "plugin", "marketplace", "remove", _MARKETPLACE_NAME])
     runner(["claude", "plugin", "marketplace", "add", source])
     runner(
         [
@@ -351,7 +346,11 @@ def ensure_plugin_installed(
 
 
 def remove_plugin(runner: Runner) -> None:
-    """Uninstall the code agent plugin. Leaves the marketplace entry in place."""
+    """Uninstall the code agent plugin, then remove only our own marketplace.
+
+    Never touches `headroom-marketplace` — that belongs to the separate
+    hooks plugin and is managed by `headroom init`.
+    """
     runner(
         [
             "claude",
@@ -362,15 +361,37 @@ def remove_plugin(runner: Runner) -> None:
             "user",
         ]
     )
+    runner(["claude", "plugin", "marketplace", "remove", _MARKETPLACE_NAME])
+
+
+# Phrases that mean "already in the state the caller wanted" for any
+# `claude` command -- never a real failure.
+_TOLERATED_PHRASES = ("already installed", "already exists", "already added")
+
+# Phrases that are only safe to tolerate for a removal command: there, "not
+# found" genuinely means "already gone", which is what the caller wanted.
+# For every other command (in particular `plugin install`), "not found" is
+# the real, live bug this guards against -- e.g. "Plugin ... not found in
+# marketplace" -- and must raise.
+_TOLERATED_REMOVAL_PHRASES = ("not found", "no marketplace", "not installed")
+
+
+def _is_removal_command(argv: list[str]) -> bool:
+    return argv[1:4] == ["plugin", "marketplace", "remove"] or argv[1:3] == ["plugin", "uninstall"]
 
 
 def _claude_runner(argv: list[str]) -> None:
     """Run a `claude ...` argv for real.
 
-    A marketplace or plugin that is already in the requested state (already
-    removed, already installed, already uninstalled) is not a failure — it
-    is exactly what the caller wanted, so a non-zero exit whose message says
-    so is tolerated rather than raised.
+    A marketplace or plugin that is already in the requested state is not a
+    failure — it is exactly what the caller wanted, so a non-zero exit whose
+    message says so is tolerated rather than raised. That tolerance is
+    narrow: "already installed/exists/added" is tolerated for any command,
+    and "not found"/"no marketplace"/"not installed" is tolerated only for
+    the removal commands (`plugin marketplace remove`, `plugin uninstall`)
+    where "not found" means "already gone". Anything else — including
+    `plugin install` reporting the plugin was "not found in marketplace" —
+    raises with the full detail.
     """
     claude_bin = shutil.which("claude")
     if not claude_bin:
@@ -379,7 +400,11 @@ def _claude_runner(argv: list[str]) -> None:
     if result.returncode == 0:
         return
     detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
-    if "already" in detail.lower() or "not found" in detail.lower() or "exists" in detail.lower():
+    lowered = detail.lower()
+    tolerated = any(phrase in lowered for phrase in _TOLERATED_PHRASES)
+    if not tolerated and _is_removal_command(argv):
+        tolerated = any(phrase in lowered for phrase in _TOLERATED_REMOVAL_PHRASES)
+    if tolerated:
         return
     raise click.ClickException(f"{' '.join(argv)} failed: {detail or result.returncode}")
 

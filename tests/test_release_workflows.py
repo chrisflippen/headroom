@@ -1515,15 +1515,36 @@ def test_version_sync_covers_every_file_the_verifier_gates() -> None:
     for path in gated:
         assert path in verify, f"{path} unexpectedly no longer gated by verify-versions.py"
 
-    # version-sync builds paths piecewise, so match on the distinctive components.
-    for fragment in [
-        "openclaw",
-        "typescript",
-        "headroom-agent-hooks",
-        "marketplace.json",
-        "server.json",
-    ]:
+    # version-sync builds most paths piecewise, so match on the distinctive
+    # components for those.
+    for fragment in ["openclaw", "typescript", "marketplace.json", "server.json"]:
         assert fragment in sync, f"version-sync.py no longer propagates a version to {fragment}"
+
+    # Plugin manifests (including headroom-agent-hooks) are no longer a
+    # hardcoded path: version-sync.py discovers every plugin.json to update by
+    # reading each entry's `source` out of the marketplace manifest, so a new
+    # plugin (like headroom-code-agent, moved under headroom/plugins/) is
+    # covered automatically. Prove that discovery still reaches the hooks
+    # plugin's manifests by running it for real against this repo.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "version_sync", ROOT / "scripts" / "version-sync.py"
+    )
+    assert spec is not None and spec.loader is not None
+    version_sync = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(version_sync)
+
+    manifest_paths = {
+        p.relative_to(ROOT).as_posix() for p in version_sync.discover_plugin_manifest_paths(ROOT)
+    }
+    for path in (
+        "plugins/headroom-agent-hooks/.claude-plugin/plugin.json",
+        "plugins/headroom-agent-hooks/.github/plugin/plugin.json",
+    ):
+        assert path in manifest_paths, (
+            f"version-sync.py's marketplace-driven discovery no longer reaches {path}"
+        )
 
 
 def test_metadata_sync_does_not_persist_credentials_for_branch_supplied_code() -> None:

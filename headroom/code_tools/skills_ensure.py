@@ -43,9 +43,13 @@ DEFAULT_SKILLS: tuple[dict[str, str], ...] = (
     },
 )
 
-# Claude Code plugins to keep current, as "<plugin>@<marketplace>".
+# Claude Code plugins to keep current, as "<plugin>@<marketplace>". The code
+# agent plugin's marketplace is "headroom-code-agent-marketplace" (Fix 1: it
+# ships its own marketplace manifest inside the installed package); the hooks
+# plugin's marketplace, "headroom-marketplace", is unrelated and managed by
+# `headroom init`.
 DEFAULT_PLUGINS: tuple[str, ...] = (
-    "headroom-code-agent@headroom-marketplace",
+    "headroom-code-agent@headroom-code-agent-marketplace",
     "headroom@headroom-marketplace",
 )
 

@@ -1,4 +1,4 @@
-"""Tests for the headroom-code-agent plugin (plugins/headroom-code-agent/).
+"""Tests for the headroom-code-agent plugin (headroom/plugins/headroom-code-agent/).
 
 These tests parse the shipped plugin files directly — agent frontmatter,
 hooks.json, marketplace.json, and plugin.json — and assert on their shape.
@@ -20,7 +20,8 @@ except ImportError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_ROOT = REPO_ROOT / "plugins" / "headroom-code-agent"
+PLUGIN_ROOT = REPO_ROOT / "headroom" / "plugins" / "headroom-code-agent"
+SHIPPED_MARKETPLACE_ROOT = REPO_ROOT / "headroom" / "plugins"
 
 
 def _frontmatter(relative_path: str) -> dict[str, Any]:
@@ -108,8 +109,37 @@ def test_marketplace_code_agent_entry_points_to_plugin_root() -> None:
         (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
     entry = next(p for p in marketplace["plugins"] if p["name"] == "headroom-code-agent")
-    assert entry["source"] == "./plugins/headroom-code-agent"
+    assert entry["source"] == "./headroom/plugins/headroom-code-agent"
     plugin_root = (REPO_ROOT / entry["source"]).resolve()
+    assert plugin_root == PLUGIN_ROOT.resolve()
+
+
+def test_github_marketplace_mirrors_the_claude_marketplace_code_agent_entry() -> None:
+    marketplace = json.loads(
+        (REPO_ROOT / ".github" / "plugin" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    entry = next(p for p in marketplace["plugins"] if p["name"] == "headroom-code-agent")
+    assert entry["source"] == "./headroom/plugins/headroom-code-agent"
+
+
+def test_shipped_marketplace_lists_only_the_code_agent_plugin() -> None:
+    """`headroom/plugins/.claude-plugin/marketplace.json` ships inside the wheel
+
+    (everything under `headroom/` does — see `[tool.maturin]` in pyproject.toml),
+    so an install of the `headroom-ai` package always has a marketplace it can
+    point `claude plugin marketplace add` at, with no GitHub fetch needed.
+    """
+    marketplace = json.loads(
+        (SHIPPED_MARKETPLACE_ROOT / ".claude-plugin" / "marketplace.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert marketplace["name"] == "headroom-code-agent-marketplace"
+    assert len(marketplace["plugins"]) == 1
+    entry = marketplace["plugins"][0]
+    assert entry["name"] == "headroom-code-agent"
+    assert entry["source"] == "./headroom-code-agent"
+    plugin_root = (SHIPPED_MARKETPLACE_ROOT / entry["source"]).resolve()
     assert plugin_root == PLUGIN_ROOT.resolve()
 
 

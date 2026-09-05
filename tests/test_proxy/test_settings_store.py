@@ -181,7 +181,7 @@ class TestCodeAgentPlugins:
         _clear_env(monkeypatch)
         assert (
             settings_store.effective_values()["code_agent.plugins"]
-            == "headroom-code-agent@headroom-marketplace,headroom@headroom-marketplace"
+            == "headroom-code-agent@headroom-code-agent-marketplace,headroom@headroom-marketplace"
         )
 
     def test_save_then_load_coerces_a_list_to_a_csv_string(self, workspace, monkeypatch):

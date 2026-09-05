@@ -58,15 +58,20 @@ def test_ensure_agent_switch_preserves_unrelated_keys(tmp_path: Path) -> None:
         assert payload[key] == value
 
 
-def test_ensure_agent_switch_does_not_overwrite_user_set_agent(tmp_path: Path) -> None:
+def test_ensure_agent_switch_takes_over_a_user_set_agent(tmp_path: Path) -> None:
+    # Ruling (Christopher, 2026-09-05): a stale agent from an uninstalled
+    # plugin (his settings held "woz:code-free") must not block the switch.
+    # Headroom always takes over, and remembers the prior value so it can be
+    # restored later.
     settings_path = tmp_path / "settings.json"
-    settings_path.write_text(json.dumps({"agent": "my-plugin:custom"}) + "\n")
+    settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
 
     changed = code_agent.ensure_agent_switch(settings_path)
 
-    assert changed is False
+    assert changed is True
     payload = json.loads(settings_path.read_text())
-    assert payload == {"agent": "my-plugin:custom"}
+    assert payload["agent"] == "headroom-code-agent:code"
+    assert payload["_headroom_managed"]["agent"]["previous"] == "woz:code-free"
 
 
 def test_ensure_agent_switch_custom_agent_name(tmp_path: Path) -> None:
@@ -103,6 +108,16 @@ def test_agent_switch_state_reports_user_set_value(tmp_path: Path) -> None:
     assert code_agent.agent_switch_state(settings_path) == "user-set:my-plugin:custom"
 
 
+def test_agent_switch_state_reports_the_taken_over_value(tmp_path: Path) -> None:
+    # Ruling (Christopher, 2026-09-05): once the switch has taken over a
+    # user-set agent, status shows what it replaced.
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
+    code_agent.ensure_agent_switch(settings_path)
+
+    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free)"
+
+
 # ---------------------------------------------------------------------------
 # remove_agent_switch
 # ---------------------------------------------------------------------------
@@ -132,6 +147,21 @@ def test_remove_agent_switch_restores_previous_value(tmp_path: Path) -> None:
 
     payload = json.loads(settings_path.read_text())
     assert payload["agent"] == "earlier:agent"
+
+
+def test_remove_agent_switch_restores_a_taken_over_user_set_agent(tmp_path: Path) -> None:
+    # Ruling (Christopher, 2026-09-05): removing the switch after it took
+    # over a stale user-set agent restores that original value.
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
+    code_agent.ensure_agent_switch(settings_path)
+
+    changed = code_agent.remove_agent_switch(settings_path)
+
+    assert changed is True
+    payload = json.loads(settings_path.read_text())
+    assert payload["agent"] == "woz:code-free"
+    assert "_headroom_managed" not in payload
 
 
 def test_remove_agent_switch_leaves_user_set_value_alone(tmp_path: Path) -> None:
@@ -262,13 +292,17 @@ def test_launch_plan_no_warning_when_project_agrees_with_default(tmp_path: Path)
     assert plan.warning is None
 
 
-def test_launch_plan_uses_the_user_set_agent_when_the_switch_is_user_set(tmp_path: Path) -> None:
+def test_launch_plan_always_uses_the_headroom_agent(tmp_path: Path) -> None:
+    # Ruling (Christopher, 2026-09-05): the switch always takes over, so
+    # launch_plan always injects DEFAULT_AGENT regardless of what is (or
+    # isn't) already in the settings file -- unless the caller passed
+    # --agent explicitly, covered by a separate test.
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"agent": "my-plugin:custom"}) + "\n")
 
     plan = code_agent.launch_plan([], tmp_path, settings_path)
 
-    assert plan.args == ("--agent", "my-plugin:custom")
+    assert plan.args == ("--agent", code_agent.DEFAULT_AGENT)
     assert plan.warning is None
 
 
@@ -280,16 +314,15 @@ def test_launch_plan_uses_the_user_set_agent_when_the_switch_is_user_set(tmp_pat
 def test_install_plugin_runs_expected_sequence() -> None:
     calls: list[list[str]] = []
 
-    code_agent.install_plugin(calls.append, "chrisflippen/headroom")
+    code_agent.install_plugin(calls.append, "/some/plugins/dir")
 
     assert calls == [
-        ["claude", "plugin", "marketplace", "remove", "headroom-marketplace"],
-        ["claude", "plugin", "marketplace", "add", "chrisflippen/headroom"],
+        ["claude", "plugin", "marketplace", "add", "/some/plugins/dir"],
         [
             "claude",
             "plugin",
             "install",
-            "headroom-code-agent@headroom-marketplace",
+            "headroom-code-agent@headroom-code-agent-marketplace",
             "--scope",
             "user",
         ],
@@ -306,10 +339,11 @@ def test_remove_plugin_runs_expected_command() -> None:
             "claude",
             "plugin",
             "uninstall",
-            "headroom-code-agent@headroom-marketplace",
+            "headroom-code-agent@headroom-code-agent-marketplace",
             "--scope",
             "user",
         ],
+        ["claude", "plugin", "marketplace", "remove", "headroom-code-agent-marketplace"],
     ]
 
 
@@ -319,18 +353,19 @@ def test_marketplace_source_prefers_env_override(monkeypatch: pytest.MonkeyPatch
     assert code_agent.marketplace_source() == "custom/source"
 
 
-def test_marketplace_source_defaults_to_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_marketplace_source_defaults_to_the_installed_package_plugins_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fix 1: the plugin ships inside the installed `headroom` package
+    # (maturin includes everything under `headroom/`), so the marketplace
+    # source defaults to the `plugins` dir next to the installed package --
+    # never a fork or a separate local git checkout.
     monkeypatch.delenv("HEADROOM_MARKETPLACE_SOURCE", raising=False)
-    monkeypatch.setattr(code_agent, "_local_checkout_source", lambda: None)
+    import headroom
 
-    assert code_agent.marketplace_source() == "chrisflippen/headroom"
+    expected = str(Path(headroom.__file__).resolve().parent / "plugins")
 
-
-def test_marketplace_source_prefers_local_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HEADROOM_MARKETPLACE_SOURCE", raising=False)
-    monkeypatch.setattr(code_agent, "_local_checkout_source", lambda: "/some/repo/checkout")
-
-    assert code_agent.marketplace_source() == "/some/repo/checkout"
+    assert code_agent.marketplace_source() == expected
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +397,9 @@ def test_plugin_installed_false_when_plugin_key_is_absent(tmp_path: Path) -> Non
 def test_plugin_installed_false_when_plugin_entry_is_an_empty_list(tmp_path: Path) -> None:
     registry_path = tmp_path / "installed_plugins.json"
     registry_path.write_text(
-        json.dumps({"version": 2, "plugins": {"headroom-code-agent@headroom-marketplace": []}})
+        json.dumps(
+            {"version": 2, "plugins": {"headroom-code-agent@headroom-code-agent-marketplace": []}}
+        )
     )
 
     assert code_agent.plugin_installed(registry_path) is False
@@ -375,7 +412,7 @@ def test_plugin_installed_true_when_plugin_entry_is_present(tmp_path: Path) -> N
             {
                 "version": 2,
                 "plugins": {
-                    "headroom-code-agent@headroom-marketplace": [
+                    "headroom-code-agent@headroom-code-agent-marketplace": [
                         {"scope": "user", "version": "1.0.0"}
                     ]
                 },
@@ -397,16 +434,15 @@ def test_ensure_plugin_installed_skips_install_when_probe_says_present() -> None
 def test_ensure_plugin_installed_installs_when_probe_says_missing() -> None:
     calls: list[list[str]] = []
 
-    code_agent.ensure_plugin_installed(calls.append, "chrisflippen/headroom", lambda: False)
+    code_agent.ensure_plugin_installed(calls.append, "/some/plugins/dir", lambda: False)
 
     assert calls == [
-        ["claude", "plugin", "marketplace", "remove", "headroom-marketplace"],
-        ["claude", "plugin", "marketplace", "add", "chrisflippen/headroom"],
+        ["claude", "plugin", "marketplace", "add", "/some/plugins/dir"],
         [
             "claude",
             "plugin",
             "install",
-            "headroom-code-agent@headroom-marketplace",
+            "headroom-code-agent@headroom-code-agent-marketplace",
             "--scope",
             "user",
         ],
@@ -437,10 +473,11 @@ def test_remove_all_removes_switch_plugin_and_tool_state(tmp_path: Path) -> None
             "claude",
             "plugin",
             "uninstall",
-            "headroom-code-agent@headroom-marketplace",
+            "headroom-code-agent@headroom-code-agent-marketplace",
             "--scope",
             "user",
         ],
+        ["claude", "plugin", "marketplace", "remove", "headroom-code-agent-marketplace"],
     ]
 
 
@@ -495,7 +532,7 @@ def test_code_agent_on_writes_switch_and_installs_plugin(
     assert result.exit_code == 0, result.output
     payload = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     assert payload["agent"] == "headroom-code-agent:code"
-    assert calls[0][:4] == ["claude", "plugin", "marketplace", "remove"]
+    assert calls[0][:4] == ["claude", "plugin", "marketplace", "add"]
 
 
 def test_code_agent_off_removes_switch(
@@ -806,7 +843,7 @@ def test_wrap_claude_installs_plugin_when_probe_says_missing(
     _clear_claude_mode_env(monkeypatch)
     captured = _patch_wrap_claude_scaffolding(monkeypatch, wrap_mod)
     monkeypatch.setattr(code_agent, "plugin_installed", lambda *_a, **_k: False)
-    monkeypatch.setattr(code_agent, "marketplace_source", lambda: "chrisflippen/headroom")
+    monkeypatch.setattr(code_agent, "marketplace_source", lambda: "/some/plugins/dir")
 
     result = runner.invoke(
         main, ["wrap", "claude", "--no-mcp", "--no-tokensave", "--no-serena"], env={}
@@ -814,13 +851,12 @@ def test_wrap_claude_installs_plugin_when_probe_says_missing(
 
     assert result.exit_code == 0, result.output
     assert captured["plugin_runner_calls"] == [
-        ["claude", "plugin", "marketplace", "remove", "headroom-marketplace"],
-        ["claude", "plugin", "marketplace", "add", "chrisflippen/headroom"],
+        ["claude", "plugin", "marketplace", "add", "/some/plugins/dir"],
         [
             "claude",
             "plugin",
             "install",
-            "headroom-code-agent@headroom-marketplace",
+            "headroom-code-agent@headroom-code-agent-marketplace",
             "--scope",
             "user",
         ],

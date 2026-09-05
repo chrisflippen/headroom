@@ -54,8 +54,7 @@ All three tools resolve their own current version through `uv add` / `uvx` at in
 ```python
 def parse(  # pyrefly: ignore[bad-override-mutable-attribute]
     self, response: Response, **kwargs: Any
-) -> Iterator[SomeItem | scrapy.Request]:
-    ...
+) -> Iterator[SomeItem | scrapy.Request]: ...
 ```
 
 Do not silence this class of error project-wide (e.g. in `[tool.pyrefly]` config) — the ignore is specific to overriding Scrapy's `TYPE_CHECKING`-only `parse` attribute, and a blanket suppression would also hide unrelated override mistakes elsewhere in the project. Every spider's `parse` override needs its own copy of this same targeted ignore; there is no way to fix it once in `settings.py` or a base class.

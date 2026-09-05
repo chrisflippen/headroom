@@ -28,7 +28,7 @@
     },
     {
       "name": "headroom-code-agent",
-      "source": "./plugins/headroom-code-agent",
+      "source": "./headroom/plugins/headroom-code-agent",
       "description": "Headroom's code agent: a Claude Code main-thread agent that reaches files and databases only through headroom's Search, Edit, and Sql tools.",
       "version": "0.37.0",
       "author": {

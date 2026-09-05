@@ -459,6 +459,12 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
+# headroom/plugins/ ships skill scripts run standalone (via subprocess) by the
+# code-agent plugin, never imported by headroom itself -- not part of the
+# typed package surface. See test_code_agent_plugin.py's docstring.
+exclude = [
+    "^headroom/plugins/",
+]
 
 # Per-module overrides for modules with dynamic typing patterns
 [[tool.mypy.overrides]]

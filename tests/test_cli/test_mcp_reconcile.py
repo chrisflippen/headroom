@@ -267,6 +267,11 @@ def test_ordinary_install_does_not_adopt_serena(monkeypatch, tmp_path: Path):
     config, _ = _setup(monkeypatch, tmp_path)
     before = config.read_bytes()
     monkeypatch.setitem(sys.modules, "mcp", object())
+    # The registry entry is built from however headroom is reachable on this
+    # machine; pin it so the test does not depend on PATH.
+    monkeypatch.setattr(
+        "headroom.mcp_registry.install.resolve_headroom_command", lambda: ["headroom"]
+    )
     registrar = ClaudeRegistrar(claude_cli=None, home_dir=tmp_path)
     monkeypatch.setattr("headroom.mcp_registry.install.get_all_registrars", lambda: [registrar])
     result = CliRunner().invoke(main, ["mcp", "install", "--agent", "claude"])

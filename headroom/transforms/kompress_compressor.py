@@ -323,7 +323,7 @@ def _canary_threshold_seconds() -> float | None:
     return raw if raw > 0 else None
 
 
-_CANARY_SENTENCE = (
+_CANARY_SENTENCE: str = (
     "Headroom probes model latency at startup so a degraded runtime is "
     "detected before live traffic depends on it."
 )
@@ -1075,6 +1075,51 @@ _download_threads_lock = threading.Lock()
 _DOWNLOAD_RETRY_BASE_SECONDS = 5.0
 _DOWNLOAD_RETRY_MAX_SECONDS = 300.0
 _download_failures: dict[str, tuple[int, float]] = {}
+
+
+# Process-wide Kompress state (`_kompress_cache`, `_download_threads`,
+# `_download_failures`). Reset via `_reset_kompress_cache_for_test` -- mirrors
+# the tracker reset helpers in headroom/proxy/helpers.py
+# (`_reset_session_beta_tracker_for_test` et al.) and the
+# `_reset_litellm_model_resolution_cache` autouse fixture in tests/conftest.py.
+#
+# Found 2026-09-05: any test that builds a real, un-mocked `ContentRouter`
+# (``enable_kompress=True`` is the default) and calls a compress path on
+# content above the word floor reaches `_try_ml_compressor`, which -- when the
+# model isn't already cached -- calls `compressor.ensure_background_load()`.
+# That starts a real daemon thread (`ensure_background_download`) that loads
+# the REAL Kompress model from the local HuggingFace cache (no network
+# needed if it's already on disk, as it is on this machine) and writes it
+# into the module-level `_kompress_cache` a few seconds later -- entirely
+# asynchronously, with no join and no monkeypatch to revert. The triggering
+# test (e.g. tests/test_garbled_compression_fixes.py's
+# `test_harness_banner_survives_router_compression_byte_intact` and
+# `test_mixed_table_render_is_not_a_quoted_json_string_blob`) passes and
+# returns immediately, long before the thread finishes -- so nothing in that
+# test looks wrong. Whichever LATER test happens to run after the thread
+# completes then observes a genuinely-loaded model in `_kompress_cache`,
+# breaking any assertion that assumes a cold/empty cache (this broke
+# tests/test_proxy_health.py's `/readyz` "kompress not ready" assertions,
+# order-dependently, purely based on how much wall-clock time had elapsed).
+# Fixed at the root: join any in-flight download thread (bounding the wait)
+# and clear all three dicts before AND after every test, so no test can leak
+# a real model load into a later one, regardless of which test triggers it.
+def _reset_kompress_cache_for_test() -> None:
+    """Reset all process-wide Kompress state (test-only).
+
+    Joins any in-flight background download/prefetch thread first -- clearing
+    the cache alone would not stop a thread already loading the model, which
+    would just repopulate it moments later in the middle of a later test.
+    """
+    with _download_threads_lock:
+        in_flight = list(_download_threads.values())
+    for thread in in_flight:
+        thread.join(timeout=30)
+    with _download_threads_lock:
+        _download_threads.clear()
+        _download_failures.clear()
+    with _kompress_lock:
+        _kompress_cache.clear()
 
 
 def _record_download_failure(model_id: str) -> None:

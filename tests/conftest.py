@@ -497,6 +497,39 @@ def _reset_litellm_model_resolution_cache() -> Generator[None, None, None]:
     _resolve_litellm_model.cache_clear()
 
 
+# `kompress_compressor._kompress_cache` is a process-lifetime, module-global
+# dict keyed by HF model id. Any test that builds a real, un-mocked
+# `ContentRouter` (``enable_kompress=True`` by default) and compresses content
+# above the word floor reaches `_try_ml_compressor`, which -- when the model
+# isn't cached yet -- calls `compressor.ensure_background_load()`. That starts
+# a real daemon thread that loads the actual Kompress model from the local
+# HuggingFace cache (no network needed once it's on disk) and writes it into
+# `_kompress_cache` a few seconds later, with no join and nothing to revert
+# it. The triggering test (e.g.
+# tests/test_garbled_compression_fixes.py::test_harness_banner_survives_router_compression_byte_intact
+# and ::test_mixed_table_render_is_not_a_quoted_json_string_blob) passes
+# immediately, long before that thread finishes, so nothing in it looks
+# wrong -- but whichever later test happens to run once the thread completes
+# then observes a genuinely-loaded model, order-dependently, purely based on
+# elapsed wall-clock time. That broke tests/test_proxy_health.py's `/readyz`
+# "kompress not ready" assertions. `_reset_kompress_cache_for_test` joins any
+# in-flight download thread (clearing the cache alone would not stop one
+# already loading the model) before clearing all Kompress process state.
+@pytest.fixture(autouse=True)
+def _reset_kompress_cache_for_test() -> Generator[None, None, None]:
+    try:
+        from headroom.transforms.kompress_compressor import (
+            _reset_kompress_cache_for_test as _reset,
+        )
+    except ModuleNotFoundError:
+        yield
+        return
+
+    _reset()
+    yield
+    _reset()
+
+
 # =============================================================================
 # Global test hooks
 # =============================================================================

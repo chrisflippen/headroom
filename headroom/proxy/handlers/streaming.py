@@ -21,7 +21,15 @@ from headroom.proxy.helpers import (
 from headroom.proxy.token_counting import gemini_output_tokens
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from fastapi.responses import Response, StreamingResponse
+
+    from headroom.backends.base import Backend
+    from headroom.proxy.memory_handler import MemoryHandler
+    from headroom.proxy.models import ProxyConfig
+    from headroom.proxy.outcome import RequestOutcome
+    from headroom.proxy.prometheus_metrics import PrometheusMetrics
 
 
 import httpx
@@ -81,7 +89,26 @@ def _parse_completion_tokens_from_sse_chunk(chunk_bytes: bytes) -> int | None:
 
 
 class StreamingMixin:
-    """Mixin providing streaming response methods for HeadroomProxy."""
+    """Mixin providing streaming response methods for HeadroomProxy.
+
+    The attributes declared in the ``TYPE_CHECKING`` block below are never
+    set here: the real values live on the concrete ``HeadroomProxy`` class
+    (``server.py``'s ``__init__``), which combines this mixin with the other
+    provider mixins via multiple inheritance. Checking this file on its own
+    gives a type checker no way to see those attributes without a stub, so
+    they are declared here purely for static analysis.
+    """
+
+    if TYPE_CHECKING:
+        config: ProxyConfig
+        metrics: PrometheusMetrics
+        http_client: httpx.AsyncClient | None
+        memory_handler: MemoryHandler | None
+        anthropic_backend: Backend | None
+        _record_request_outcome: Callable[[RequestOutcome], Awaitable[None]]
+        _assistant_message_from_response_json: Callable[
+            [dict[str, Any] | None], dict[str, Any] | None
+        ]
 
     _mid_turn_queues: dict[str, asyncio.Queue] = {}
     _active_streams: set[str] = set()

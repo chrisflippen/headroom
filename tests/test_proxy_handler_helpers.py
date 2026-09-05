@@ -4,12 +4,16 @@ import asyncio
 import base64
 import builtins
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any, NoReturn
 from unittest.mock import patch
 
 import httpx
 import pytest
-from fastapi.responses import StreamingResponse
+from fastapi import Request
+from fastapi.responses import Response, StreamingResponse
+from starlette.datastructures import URL, Headers
 
 from headroom.proxy.handlers.anthropic import AnthropicHandlerMixin, _is_googleapis_endpoint
 from headroom.proxy.handlers.openai import (
@@ -22,7 +26,41 @@ from headroom.proxy.helpers import (
     _headroom_bypass_enabled,
     relocate_system_messages_to_top_level,
 )
+from headroom.proxy.models import ProxyConfig
+from headroom.proxy.outcome import RequestOutcome
 from headroom.proxy.server import HeadroomProxy
+
+
+def _fake_url(path: str, query: str = "") -> URL:
+    """Build a real ``starlette`` ``URL`` for a fake ``Request`` test double.
+
+    ``Request.url`` is a read-only property typed ``URL``; overriding it with
+    a plain ``SimpleNamespace`` (as these test doubles used to) only worked
+    because the doubles did not actually subclass ``Request``. Now that they
+    do (see ``_FakeRequest`` below), the override must be a real ``URL``.
+    """
+    url = URL(f"http://testserver{path}")
+    return url.replace(query=query) if query else url
+
+
+class _FakeRequest(Request):
+    """Base class for lightweight ``Request`` test doubles.
+
+    The real ``Request.__init__`` requires a full ASGI ``scope`` dict, which
+    none of the handlers under test actually need. Overriding both ``__new__``
+    and ``__init__`` to skip ``Request.__init__`` (Python still calls
+    ``__init__`` after ``__new__`` returns an instance of ``cls``, so
+    ``__new__`` alone is not enough) keeps these as genuine ``Request``
+    subclasses (so ``isinstance`` checks and static type checkers see the
+    real class) while each subclass below fills in only the attributes and
+    methods its handler under test actually reads.
+    """
+
+    def __new__(cls, *args: object, **kwargs: object) -> _FakeRequest:
+        return object.__new__(cls)
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
 
 
 def _jwt(payload: object) -> str:
@@ -53,32 +91,37 @@ def test_googleapis_endpoint_gate_uses_hostname_boundary(url: str, expected: boo
 
 
 class _ImageCompressor:
-    def __init__(self, compressed_message):
+    def __init__(self, compressed_message: dict[str, Any]) -> None:
         self._compressed_message = compressed_message
 
-    def compress(self, messages, provider):  # noqa: ANN001, ANN201
+    def compress(self, messages: list[dict[str, Any]], provider: str) -> list[dict[str, Any]]:
         assert provider == "anthropic"
         return [self._compressed_message]
 
 
 class _FreshCompressor:
     instances = 0
+    # Set dynamically by the real `_get_image_compressor()` (see
+    # headroom/proxy/helpers.py) on whatever `ImageCompressor` instance it
+    # creates; declared here so this test double has the same shape.
+    _is_singleton = False
 
-    def __init__(self):
+    def __init__(self) -> None:
         type(self).instances += 1
 
 
-class _TimeoutHttpClient:
-    async def request(self, **kwargs):  # noqa: ANN001, ANN201
+class _TimeoutHttpClient(httpx.AsyncClient):
+    async def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
         raise httpx.ConnectTimeout("connect timed out")
 
 
-class _RecordingHttpClient:
+class _RecordingHttpClient(httpx.AsyncClient):
     def __init__(self, label: str) -> None:
+        super().__init__()
         self.label = label
         self.calls = 0
 
-    async def request(self, **kwargs):  # noqa: ANN001, ANN201
+    async def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
         self.calls += 1
         request = httpx.Request(kwargs["method"], kwargs["url"])
         return httpx.Response(
@@ -89,41 +132,40 @@ class _RecordingHttpClient:
         )
 
 
-class _ChatGPTAccountRequest:
+class _ChatGPTAccountRequest(_FakeRequest):
     method = "GET"
-    headers = {}
-    url = SimpleNamespace(path="/backend-api/me", query="")
+    headers: Headers = Headers({})
+    url: URL = _fake_url("/backend-api/me")
 
     async def body(self) -> bytes:
         return b""
 
 
-class _PassthroughRequest:
+class _PassthroughRequest(_FakeRequest):
     method = "GET"
-    headers = {}
-    url = SimpleNamespace(path="/some/other/path", query="")
+    headers: Headers = Headers({})
+    url: URL = _fake_url("/some/other/path")
 
     async def body(self) -> bytes:
         return b""
 
 
-class _VertexPassthroughRequest:
+class _VertexPassthroughRequest(_FakeRequest):
     method = "POST"
-    headers = {}
-    url = SimpleNamespace(
-        path="/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent",
-        query="",
+    headers: Headers = Headers({})
+    url: URL = _fake_url(
+        "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent"
     )
 
     async def body(self) -> bytes:
         return b'{"contents":[]}'
 
 
-class _VertexStreamPassthroughRequest:
+class _VertexStreamPassthroughRequest(_FakeRequest):
     method = "POST"
-    headers = {}
-    url = SimpleNamespace(
-        path="/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:streamGenerateContent",
+    headers: Headers = Headers({})
+    url: URL = _fake_url(
+        "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:streamGenerateContent",
         query="alt=sse",
     )
 
@@ -131,14 +173,12 @@ class _VertexStreamPassthroughRequest:
         return b'{"contents":[]}'
 
 
-class _VertexGeminiImageRequest:
+class _VertexGeminiImageRequest(_FakeRequest):
     method = "POST"
-    headers = {}
-    query_params = {}
-    scope: dict = {"type": "http", "method": "POST"}
-    url = SimpleNamespace(
-        path="/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent",
-        query="",
+    headers: Headers = Headers({})
+    scope: dict[str, Any] = {"type": "http", "method": "POST", "query_string": b""}
+    url: URL = _fake_url(
+        "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent"
     )
 
     async def body(self) -> bytes:
@@ -161,8 +201,8 @@ class _VertexGeminiImageRequest:
         ).encode("utf-8")
 
 
-class _VertexUsageClient:
-    async def request(self, **kwargs):  # noqa: ANN001, ANN201
+class _VertexUsageClient(httpx.AsyncClient):
+    async def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
         request = httpx.Request(kwargs["method"], kwargs["url"], content=kwargs["content"])
         return httpx.Response(
             200,
@@ -183,21 +223,26 @@ class _AsyncChunks(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
 
-    async def __aiter__(self):  # noqa: ANN204
+    async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
             yield chunk
 
 
-class _VertexStreamClient:
+class _VertexStreamClient(httpx.AsyncClient):
     def __init__(self) -> None:
+        super().__init__()
         self.sent_url = ""
 
-    def build_request(self, method, url, headers, content):  # noqa: ANN001, ANN201
+    def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        method = args[0] if args else kwargs["method"]
+        url = args[1] if len(args) > 1 else kwargs["url"]
         self.sent_url = str(url)
-        return httpx.Request(method, url, headers=headers, content=content)
+        return httpx.Request(
+            method, url, headers=kwargs.get("headers"), content=kwargs.get("content")
+        )
 
-    async def send(self, request, stream=False):  # noqa: ANN001, ANN201
-        assert stream is True
+    async def send(self, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        assert kwargs.get("stream") is True
         return httpx.Response(
             200,
             request=request,
@@ -212,15 +257,18 @@ class _VertexStreamClient:
         )
 
 
-class _RetryThenSuccessClient:
+class _RetryThenSuccessClient(httpx.AsyncClient):
     def __init__(self) -> None:
+        super().__init__()
         self.attempts = 0
 
-    async def post(self, url, content, headers, timeout=None):  # noqa: ANN001, ANN201
+    async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
         self.attempts += 1
         if self.attempts == 1:
             raise httpx.ConnectTimeout("connect timed out")
-        del timeout
+        url = args[0] if args else kwargs["url"]
+        headers = kwargs.get("headers")
+        content = kwargs.get("content")
         request = httpx.Request("POST", url, headers=headers, content=content)
         return httpx.Response(200, request=request, content=b"{}")
 
@@ -309,7 +357,7 @@ def test_relocate_system_messages_moves_stray_system_into_top_level() -> None:
 
 
 def test_relocate_system_messages_appends_to_existing_system() -> None:
-    messages = [
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": [{"type": "text", "text": "B"}]},
         {"role": "user", "content": "hi"},
     ]
@@ -350,7 +398,7 @@ def test_relocate_system_messages_preserves_valid_mid_conversation_section() -> 
 
 
 def test_relocate_system_messages_preserves_consecutive_valid_section_at_end() -> None:
-    messages = [
+    messages: list[dict[str, Any]] = [
         {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
         {"role": "system", "content": "First update."},
         {"role": "system", "content": "Second update."},
@@ -416,21 +464,21 @@ def test_headroom_bypass_helper_is_transport_neutral() -> None:
 
 
 def test_openai_passthrough_without_config_preserves_generic_request() -> None:
-    handler = object.__new__(OpenAIHandlerMixin)
+    handler = object.__new__(HeadroomProxy)
     handler.http_client = _RecordingHttpClient("h2")
     request = _PassthroughRequest()
 
     response = asyncio.run(handler.handle_passthrough(request, "https://api.openai.com"))
 
     assert response.status_code == 200
-    assert json.loads(response.body)["client"] == "h2"
+    assert json.loads(bytes(response.body))["client"] == "h2"
 
 
 def test_openai_passthrough_connect_timeout_returns_502() -> None:
-    handler = object.__new__(OpenAIHandlerMixin)
+    handler = object.__new__(HeadroomProxy)
     handler.http_client = _TimeoutHttpClient()
 
-    async def run():
+    async def run() -> Response:
         return await handler.handle_passthrough(
             _PassthroughRequest(),
             "https://api.openai.com",
@@ -439,7 +487,7 @@ def test_openai_passthrough_connect_timeout_returns_502() -> None:
     response = asyncio.run(run())
 
     assert response.status_code == 502
-    payload = json.loads(response.body)
+    payload = json.loads(bytes(response.body))
     assert payload["error"]["type"] == "connection_error"
     assert "Failed to connect to upstream API" in payload["error"]["message"]
 
@@ -456,7 +504,7 @@ def test_prefers_http1_passthrough_matches_chatgpt_hosts_only() -> None:
 
 
 def test_chatgpt_passthrough_uses_http1_client() -> None:
-    handler = object.__new__(OpenAIHandlerMixin)
+    handler = object.__new__(HeadroomProxy)
     handler.http_client = _RecordingHttpClient("h2")
     handler.http_client_h1 = _RecordingHttpClient("h1")
 
@@ -465,13 +513,13 @@ def test_chatgpt_passthrough_uses_http1_client() -> None:
     )
 
     assert response.status_code == 200
-    assert json.loads(response.body)["client"] == "h1"
+    assert json.loads(bytes(response.body))["client"] == "h1"
     assert handler.http_client.calls == 0
     assert handler.http_client_h1.calls == 1
 
 
 def test_non_chatgpt_passthrough_uses_default_client() -> None:
-    handler = object.__new__(OpenAIHandlerMixin)
+    handler = object.__new__(HeadroomProxy)
     handler.http_client = _RecordingHttpClient("h2")
     handler.http_client_h1 = _RecordingHttpClient("h1")
 
@@ -480,13 +528,13 @@ def test_non_chatgpt_passthrough_uses_default_client() -> None:
     )
 
     assert response.status_code == 200
-    assert json.loads(response.body)["client"] == "h2"
+    assert json.loads(bytes(response.body))["client"] == "h2"
     assert handler.http_client.calls == 1
     assert handler.http_client_h1.calls == 0
 
 
 def test_chatgpt_passthrough_falls_back_when_h1_client_missing() -> None:
-    handler = object.__new__(OpenAIHandlerMixin)
+    handler = object.__new__(HeadroomProxy)
     handler.http_client = _RecordingHttpClient("h2")
     handler.http_client_h1 = None
 
@@ -495,7 +543,7 @@ def test_chatgpt_passthrough_falls_back_when_h1_client_missing() -> None:
     )
 
     assert response.status_code == 200
-    assert json.loads(response.body)["client"] == "h2"
+    assert json.loads(bytes(response.body))["client"] == "h2"
     assert handler.http_client.calls == 1
 
 
@@ -562,19 +610,31 @@ def test_passthrough_usage_counts_gemini_thinking_tokens() -> None:
     assert usage["input_tokens"] == 1000
 
 
+class _DashboardRecordingProxy(HeadroomProxy):
+    """``HeadroomProxy`` subclass used by tests that record dashboard outcomes.
+
+    Real method overrides instead of monkeypatched instance attributes:
+    assigning a plain function over an instance's bound-method slot trips both
+    pyrefly's ``bad-assignment`` and mypy's ``method-assign`` checks (real
+    safety checks, not false positives), since the assigned value is not a
+    bound method of the right shape. A genuine method override in a subclass
+    body is normal, fully-typed OOP and triggers neither.
+    """
+
+    def __init__(self, request_id: str = "req_test") -> None:
+        self.recorded_outcomes: list[RequestOutcome] = []
+        self._fake_request_id = request_id
+
+    async def _next_request_id(self) -> str:
+        return self._fake_request_id
+
+    async def _record_request_outcome(self, outcome: RequestOutcome) -> None:
+        self.recorded_outcomes.append(outcome)
+
+
 def test_vertex_passthrough_records_usage_metadata_for_dashboard() -> None:
-    handler = object.__new__(HeadroomProxy)
+    handler = _DashboardRecordingProxy("req_vertex")
     handler.http_client = _VertexUsageClient()
-    outcomes = []
-
-    async def next_request_id():  # noqa: ANN202
-        return "req_vertex"
-
-    async def record(outcome):  # noqa: ANN001, ANN202
-        outcomes.append(outcome)
-
-    handler._next_request_id = next_request_id
-    handler._record_request_outcome = record
 
     response = asyncio.run(
         handler.handle_passthrough(
@@ -586,8 +646,8 @@ def test_vertex_passthrough_records_usage_metadata_for_dashboard() -> None:
     )
 
     assert response.status_code == 200
-    assert len(outcomes) == 1
-    outcome = outcomes[0]
+    assert len(handler.recorded_outcomes) == 1
+    outcome = handler.recorded_outcomes[0]
     assert outcome.provider == "vertex:google"
     assert outcome.model == "gemini-2.0-flash"
     assert outcome.optimized_tokens == 11
@@ -596,18 +656,8 @@ def test_vertex_passthrough_records_usage_metadata_for_dashboard() -> None:
 
 
 def test_vertex_stream_passthrough_preserves_chunks_and_records_usage() -> None:
-    handler = object.__new__(HeadroomProxy)
+    handler = _DashboardRecordingProxy("req_vertex_stream")
     handler.http_client = _VertexStreamClient()
-    outcomes = []
-
-    async def next_request_id():  # noqa: ANN202
-        return "req_vertex_stream"
-
-    async def record(outcome):  # noqa: ANN001, ANN202
-        outcomes.append(outcome)
-
-    handler._next_request_id = next_request_id
-    handler._record_request_outcome = record
 
     response = asyncio.run(
         handler.handle_passthrough(
@@ -620,16 +670,20 @@ def test_vertex_stream_passthrough_preserves_chunks_and_records_usage() -> None:
 
     assert isinstance(response, StreamingResponse)
 
-    async def collect():  # noqa: ANN202
-        return [chunk async for chunk in response.body_iterator]
+    async def collect(stream: StreamingResponse) -> list[bytes]:
+        chunks: list[bytes] = []
+        async for chunk in stream.body_iterator:
+            assert isinstance(chunk, bytes)
+            chunks.append(chunk)
+        return chunks
 
-    chunks = asyncio.run(collect())
+    chunks = asyncio.run(collect(response))
 
     assert len(chunks) == 2
     assert chunks[0].startswith(b'data: {"candidates"')
     assert b'"usageMetadata"' in chunks[1]
-    assert len(outcomes) == 1
-    outcome = outcomes[0]
+    assert len(handler.recorded_outcomes) == 1
+    outcome = handler.recorded_outcomes[0]
     assert outcome.provider == "vertex:google"
     assert outcome.model == "gemini-2.0-flash"
     assert outcome.optimized_tokens == 13
@@ -638,14 +692,8 @@ def test_vertex_stream_passthrough_preserves_chunks_and_records_usage() -> None:
 
 
 def test_stream_finalizer_records_vertex_provider_for_dashboard() -> None:
-    handler = object.__new__(HeadroomProxy)
-    handler.config = SimpleNamespace(log_full_messages=False)
-    outcomes = []
-
-    async def record(outcome):  # noqa: ANN001, ANN202
-        outcomes.append(outcome)
-
-    handler._record_request_outcome = record
+    handler = _DashboardRecordingProxy()
+    handler.config = ProxyConfig(log_full_messages=False)
 
     asyncio.run(
         handler._finalize_stream_response(
@@ -675,8 +723,8 @@ def test_stream_finalizer_records_vertex_provider_for_dashboard() -> None:
         )
     )
 
-    assert len(outcomes) == 1
-    outcome = outcomes[0]
+    assert len(handler.recorded_outcomes) == 1
+    outcome = handler.recorded_outcomes[0]
     assert outcome.provider == "vertex:google"
     assert outcome.model == "gemini-2.0-flash"
     assert outcome.optimized_tokens == 12
@@ -685,21 +733,36 @@ def test_stream_finalizer_records_vertex_provider_for_dashboard() -> None:
     assert outcome.cache_read_tokens == 2
 
 
-def test_vertex_gemini_non_text_generate_records_dashboard_outcome() -> None:
-    handler = object.__new__(HeadroomProxy)
-    handler.memory_handler = None
-    handler.rate_limiter = None
-    outcomes = []
-    upstream_urls = []
+class _VertexImageRetryProxy(_DashboardRecordingProxy):
+    """Adds a ``_retry_request`` override that records the upstream URL used.
 
-    async def next_request_id():  # noqa: ANN202
-        return "req_vertex_image"
+    The override's parameter shape matches ``HeadroomProxy._retry_request``
+    exactly (see ``headroom/proxy/server.py``) so it is a genuine, type-safe
+    override rather than an incompatible signature that happens to work at
+    runtime.
+    """
 
-    async def record(outcome):  # noqa: ANN001, ANN202
-        outcomes.append(outcome)
+    def __init__(self, request_id: str = "req_test") -> None:
+        super().__init__(request_id)
+        self.retry_urls: list[str] = []
 
-    async def retry_request(method, url, headers, body):  # noqa: ANN001, ANN202
-        upstream_urls.append(url)
+    async def _retry_request(
+        self,
+        method: str,
+        url: str,
+        headers: dict,
+        body: dict,
+        stream: bool = False,
+        *,
+        original_body_bytes: bytes | None = None,
+        body_mutated: bool = True,
+        mutation_reasons: list[str] | None = None,
+        request_id: str | None = None,
+        forwarder_name: str = "server",
+        path_for_log: str | None = None,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> httpx.Response:
+        self.retry_urls.append(url)
         request = httpx.Request(method, url, headers=headers)
         return httpx.Response(
             200,
@@ -714,9 +777,11 @@ def test_vertex_gemini_non_text_generate_records_dashboard_outcome() -> None:
             },
         )
 
-    handler._next_request_id = next_request_id
-    handler._record_request_outcome = record
-    handler._retry_request = retry_request
+
+def test_vertex_gemini_non_text_generate_records_dashboard_outcome() -> None:
+    handler = _VertexImageRetryProxy("req_vertex_image")
+    handler.memory_handler = None
+    handler.rate_limiter = None
 
     response = asyncio.run(
         handler.handle_gemini_generate_content(
@@ -728,14 +793,14 @@ def test_vertex_gemini_non_text_generate_records_dashboard_outcome() -> None:
     )
 
     assert response.status_code == 200
-    assert upstream_urls == [
+    assert handler.retry_urls == [
         "https://vertex.test/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent"
     ]
     assert response.headers["x-headroom-tokens-before"] == "31"
     assert response.headers["x-headroom-tokens-after"] == "31"
     assert response.headers["x-headroom-tokens-saved"] == "0"
-    assert len(outcomes) == 1
-    outcome = outcomes[0]
+    assert len(handler.recorded_outcomes) == 1
+    outcome = handler.recorded_outcomes[0]
     assert outcome.provider == "vertex:google"
     assert outcome.model == "gemini-2.0-flash"
     assert outcome.original_tokens == 31
@@ -748,7 +813,7 @@ def test_vertex_gemini_non_text_generate_records_dashboard_outcome() -> None:
 def test_retry_request_retries_connect_timeout() -> None:
     proxy = object.__new__(HeadroomProxy)
     proxy.http_client = _RetryThenSuccessClient()
-    proxy.config = SimpleNamespace(
+    proxy.config = ProxyConfig(
         retry_enabled=True,
         retry_max_attempts=2,
         retry_base_delay_ms=0,
@@ -765,16 +830,19 @@ def test_retry_request_retries_connect_timeout() -> None:
     )
 
     assert response.status_code == 200
+    assert isinstance(proxy.http_client, _RetryThenSuccessClient)
     assert proxy.http_client.attempts == 2
 
 
 def test_retry_request_returns_503_when_shutdown_interrupts_retry_sleep() -> None:
-    class _Always429Client:
+    class _Always429Client(httpx.AsyncClient):
         def __init__(self) -> None:
+            super().__init__()
             self.attempts = 0
 
-        async def post(self, url, **kwargs):  # type: ignore[no-untyped-def]
+        async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
             self.attempts += 1
+            url = args[0] if args else kwargs["url"]
             return httpx.Response(
                 429,
                 request=httpx.Request("POST", url),
@@ -784,7 +852,7 @@ def test_retry_request_returns_503_when_shutdown_interrupts_retry_sleep() -> Non
 
     proxy = object.__new__(HeadroomProxy)
     proxy.http_client = _Always429Client()
-    proxy.config = SimpleNamespace(
+    proxy.config = ProxyConfig(
         retry_enabled=True,
         # This test is about the shutdown-interrupts-retry-sleep path, which is
         # only reachable for a 429/529 when overload retry is opted in
@@ -815,17 +883,19 @@ def test_retry_request_returns_503_when_shutdown_interrupts_retry_sleep() -> Non
         }
     }
     assert response.headers["retry-after"] == "0"
+    assert isinstance(proxy.http_client, _Always429Client)
     assert proxy.http_client.attempts == 1
 
 
 def test_anthropic_tool_sort_and_context_append_helpers() -> None:
-    tools = [
+    tools: list[dict[str, Any]] = [
         {"type": "function", "function": {"name": "beta"}},
         {"name": "alpha"},
         {"type": "tool"},
     ]
 
     sorted_tools = AnthropicHandlerMixin._sort_tools_deterministically(tools)
+    assert sorted_tools is not None
 
     assert [AnthropicHandlerMixin._tool_sort_key(tool)[0] for tool in sorted_tools] == [
         "alpha",
@@ -907,7 +977,9 @@ def test_anthropic_image_compression_helper_only_rewrites_latest_eligible_turn()
     ) == [compressed]
 
 
-def test_proxy_helper_reuses_a_singleton_image_compressor(monkeypatch) -> None:
+def test_proxy_helper_reuses_a_singleton_image_compressor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # #2513: the compressor caches heavyweight models, so it must be a
     # process-wide singleton rather than a fresh instance per request.
     from headroom.proxy import helpers
@@ -926,13 +998,15 @@ def test_proxy_helper_reuses_a_singleton_image_compressor(monkeypatch) -> None:
     assert _FreshCompressor.instances == 1
 
 
-def test_proxy_helper_caches_image_stack_import_failure(monkeypatch) -> None:
+def test_proxy_helper_caches_image_stack_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from headroom.proxy import helpers
 
     real_import = builtins.__import__
     calls = 0
 
-    def fake_import(name, *args, **kwargs):  # noqa: ANN001, ANN202
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
         nonlocal calls
         if name == "headroom.image":
             calls += 1
@@ -1035,7 +1109,7 @@ def _fake_request(headers: dict[str, str]) -> SimpleNamespace:
 def test_resolve_ccr_workspace_explicit_project_id_wins() -> None:
     """x-headroom-project-id is the highest-priority signal."""
     request = _fake_request({"x-headroom-project-id": "my-cool-project"})
-    body = {}
+    body: dict[str, Any] = {}
     key, label = AnthropicHandlerMixin._resolve_ccr_workspace(request, body)
     assert key.startswith("my-cool-project-")
     assert len(key.split("-")[-1]) == 16
@@ -1045,7 +1119,7 @@ def test_resolve_ccr_workspace_explicit_project_id_wins() -> None:
 def test_resolve_ccr_workspace_cwd_header() -> None:
     """x-headroom-cwd produces a stable per-cwd key + basename label."""
     request = _fake_request({"x-headroom-cwd": "/home/user/code/daphni-rails"})
-    body = {}
+    body: dict[str, Any] = {}
     key, label = AnthropicHandlerMixin._resolve_ccr_workspace(request, body)
     # Key format: "{basename}-{sha256[:16]}" — stable per absolute cwd.
     assert key.startswith("daphni-rails-")
@@ -1067,7 +1141,7 @@ def test_resolve_ccr_workspace_two_cwds_get_distinct_keys() -> None:
 def test_resolve_ccr_workspace_no_signal_returns_empty() -> None:
     """No project-id, no cwd header, no system prompt → fail-closed signal."""
     request = _fake_request({})
-    body = {}
+    body: dict[str, Any] = {}
     key, label = AnthropicHandlerMixin._resolve_ccr_workspace(request, body)
     assert key == ""
     assert label is None
@@ -1089,11 +1163,11 @@ def test_resolve_ccr_workspace_malformed_request_returns_empty() -> None:
     """A request whose headers attribute can't be dict()-ed fails closed, not crashes."""
 
     class _BrokenHeaders:
-        def __iter__(self):
+        def __iter__(self) -> NoReturn:
             raise RuntimeError("boom")
 
     request = SimpleNamespace(headers=_BrokenHeaders())
-    body = {}
+    body: dict[str, Any] = {}
     # The helper catches the exception, logs it, and returns the fail-
     # closed sentinel ("", None). Critically, it does NOT raise — the
     # proxy must continue serving the request even if CCR scoping fails.
@@ -1122,7 +1196,7 @@ class TestHasNewCcrMarkers:
         inj.scan_for_markers([{"role": "user", "content": c} for c in contents])
         return inj.detected_hashes
 
-    def test_replayed_markers_are_not_new(self):
+    def test_replayed_markers_are_not_new(self) -> None:
         from headroom.proxy.helpers import has_new_ccr_markers
 
         marker = "[100 items compressed to 10. Retrieve more: hash=abc123def456abc123def456]"
@@ -1138,7 +1212,7 @@ class TestHasNewCcrMarkers:
             is False
         )
 
-    def test_genuinely_new_marker_is_detected(self):
+    def test_genuinely_new_marker_is_detected(self) -> None:
         from headroom.proxy.helpers import has_new_ccr_markers
 
         old = "[100 items compressed to 10. Retrieve more: hash=abc123def456abc123def456]"
@@ -1154,7 +1228,7 @@ class TestHasNewCcrMarkers:
             is True
         )
 
-    def test_no_previous_forward_means_all_new(self):
+    def test_no_previous_forward_means_all_new(self) -> None:
         from headroom.proxy.helpers import has_new_ccr_markers
 
         marker = "[100 items compressed to 10. Retrieve more: hash=abc123def456abc123def456]"
@@ -1167,7 +1241,7 @@ class TestHasNewCcrMarkers:
             is True
         )
 
-    def test_no_markers_means_nothing_new(self):
+    def test_no_markers_means_nothing_new(self) -> None:
         from headroom.proxy.helpers import has_new_ccr_markers
 
         assert (
@@ -1180,7 +1254,7 @@ class TestHasNewCcrMarkers:
         )
 
 
-def test_strict_frozen_count_tool_and_function_tail_are_mutable():
+def test_strict_frozen_count_tool_and_function_tail_are_mutable() -> None:
     # OpenAI function-calling harnesses (Kimi / fireworks) end each turn with a
     # role:"tool" (or legacy role:"function") observation — NOT role:"user".
     # Gating the mutable tail on role=="user" froze the whole conversation on
@@ -1210,12 +1284,12 @@ def test_strict_frozen_count_tool_and_function_tail_are_mutable():
     )
 
 
-class _ClientDisconnectRequest:
+class _ClientDisconnectRequest(_FakeRequest):
     """Mock request whose body() raises ClientDisconnect to simulate mid-stream cancel."""
 
     method = "POST"
-    headers = {"content-type": "application/json"}
-    url = SimpleNamespace(path="/v1/chat/completions", query="")
+    headers: Headers = Headers({"content-type": "application/json"})
+    url: URL = _fake_url("/v1/chat/completions")
 
     async def body(self) -> bytes:
         from starlette.requests import ClientDisconnect
@@ -1223,13 +1297,13 @@ class _ClientDisconnectRequest:
         raise ClientDisconnect()
 
 
-class _ClientDisconnectStreamRequest:
+class _ClientDisconnectStreamRequest(_FakeRequest):
     """Mock request for streaming passthrough with ClientDisconnect."""
 
     method = "POST"
-    headers = {"content-type": "application/json"}
-    url = SimpleNamespace(
-        path="/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:streamGenerateContent",
+    headers: Headers = Headers({"content-type": "application/json"})
+    url: URL = _fake_url(
+        "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.0-flash:streamGenerateContent",
         query="alt=sse",
     )
 
@@ -1239,7 +1313,7 @@ class _ClientDisconnectStreamRequest:
         raise ClientDisconnect()
 
 
-def test_handle_passthrough_client_disconnect():
+def test_handle_passthrough_client_disconnect() -> None:
     """ClientDisconnect during body read returns 204 instead of crashing TaskGroup."""
     handler = object.__new__(OpenAIHandlerMixin)
     response = asyncio.run(
@@ -1248,7 +1322,7 @@ def test_handle_passthrough_client_disconnect():
     assert response.status_code == 204
 
 
-def test_handle_streaming_passthrough_client_disconnect():
+def test_handle_streaming_passthrough_client_disconnect() -> None:
     """ClientDisconnect during streaming body read returns 204."""
     handler = object.__new__(OpenAIHandlerMixin)
     response = asyncio.run(

@@ -8,6 +8,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import json
 import tempfile
+import warnings
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,23 @@ if TYPE_CHECKING:
 
     from headroom.config import HeadroomConfig, RequestMetrics, SmartCrusherConfig
     from headroom.providers.openai import OpenAIProvider, OpenAITokenCounter
+
+# Capture the real `warnings.warn` before pytest imports any test module.
+# Some optional dependencies (e.g. `crewai`, imported by
+# tests/test_integrations/crewai/) do `warnings.warn = <narrower
+# replacement>` at *module import time* and never undo it -- once collection
+# imports that module, every test for the rest of the pytest process calls
+# the replacement instead of the real function. That replacement's signature
+# is often narrower than the real one (it dropped `skip_file_prefixes`, a
+# newer `warnings.warn` keyword argument), so it breaks unrelated code
+# elsewhere in the suite (observed: `htmldate`'s `_strptime.py` call raising
+# `TypeError: ... got an unexpected keyword argument 'skip_file_prefixes'` in
+# a wholly unrelated test) with no indication the two tests are connected.
+# This module (conftest.py) is always imported before any test module is
+# collected, and nothing above this line imports `crewai` (or any other
+# dependency known to monkeypatch `warnings.warn`), so this reference is
+# always the original, un-monkeypatched function.
+_ORIGINAL_WARNINGS_WARN = warnings.warn
 
 
 # A live `headroom` dev session exports HEADROOM_* into the shell (and the
@@ -67,18 +85,25 @@ def _scrub_developer_headroom_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # `~/.headroom/savings_events.jsonl` / `proxy_savings.json`.
 #
 # Redirect HOME (and its Windows equivalent) plus both canonical roots at
-# fresh, already-created sub-directories of `tmp_path` so every one of those
-# resolution paths -- the `headroom.paths` helpers *and* the raw
-# `Path.home()` call sites -- lands somewhere disposable. Depends on the
-# scrub fixture (declared as a fixture arg, not just declaration order) so
-# this always runs after HEADROOM_* is cleared and gets the last word.
+# fresh, already-created sub-directories of their own dedicated tmp tree
+# (via `tmp_path_factory`, *not* the test's own `tmp_path`) so every one of
+# those resolution paths -- the `headroom.paths` helpers *and* the raw
+# `Path.home()` call sites -- lands somewhere disposable without leaking
+# into a test's own `tmp_path` contents (a test asserting on
+# `tmp_path.iterdir()` must see only what it wrote, not our isolation
+# scaffolding). Depends on the scrub fixture (declared as a fixture arg, not
+# just declaration order) so this always runs after HEADROOM_* is cleared
+# and gets the last word.
 @pytest.fixture(autouse=True)
 def _isolate_headroom_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _scrub_developer_headroom_env: None
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    _scrub_developer_headroom_env: None,
 ) -> None:
-    fake_home = tmp_path / "fake-home"
-    fake_workspace = tmp_path / "fake-workspace"
-    fake_config = tmp_path / "fake-config"
+    base = tmp_path_factory.mktemp("headroom-isolated-home")
+    fake_home = base / "fake-home"
+    fake_workspace = base / "fake-workspace"
+    fake_config = base / "fake-config"
     for directory in (fake_home, fake_workspace, fake_config):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -217,6 +242,167 @@ def allow_real_service_manager() -> None:
     exceedingly rare -- it is exactly the gap that took the production proxy
     down for 8 hours -- so any use of it should be reviewed carefully.
     """
+    return None
+
+
+_GUARDED_PROXY_PORT = 8787
+_GUARDED_PROXY_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_guarded_proxy_address(address: tuple[Any, ...] | str | bytes) -> bool:
+    """True when *address* names the developer's real, live proxy port.
+
+    Only ever matches that one well-known port -- tests routinely bind their
+    own ephemeral-port servers (httpx/respx test servers, local echo
+    servers, ...) and those must keep working untouched.
+    """
+    if not isinstance(address, tuple) or len(address) < 2:
+        return False
+    host, port = address[0], address[1]
+    return port == _GUARDED_PROXY_PORT and str(host) in _GUARDED_PROXY_HOSTS
+
+
+def _raise_real_proxy_network_blocked() -> None:
+    raise ConnectionRefusedError(
+        f"test tried to open a real TCP connection to 127.0.0.1:{_GUARDED_PROXY_PORT} "
+        "-- the developer's live Headroom proxy listens there. "
+        "headroom/cli/wrap.py's _check_proxy() / "
+        "headroom/providers/copilot/wrap.py's query_proxy_config() do exactly "
+        "this over a real socket (HOME/env-var isolation cannot help here -- "
+        "the port itself is real regardless of HOME), read the live proxy's "
+        "own pid out of its /health payload, and hand that real pid to "
+        "_kill_proxy_by_pid() -> os.kill(pid, SIGTERM). This SIGTERM'd the "
+        "developer's live proxy eight times in one test run (2026-09-05: "
+        "_proxy_needs_version_restart()/_detect_running_proxy_backend() ->"
+        " _kill_proxy_by_pid(), headroom/cli/wrap.py:3647/3663). If a test "
+        "genuinely needs to probe or restart a real local proxy, opt in "
+        "explicitly with `@pytest.mark.allow_real_service_manager` or the "
+        "`allow_real_service_manager` fixture, and bind that proxy on a port "
+        "other than 8787."
+    )
+
+
+def _raise_real_process_signal_blocked(pid: int) -> None:
+    raise AssertionError(
+        f"test tried to signal a process it did not start: pid {pid}. "
+        "headroom/cli/wrap.py::_kill_proxy_by_pid and headroom/install/"
+        "runtime.py's stop path both call os.kill(pid, SIGTERM/SIGKILL) on a "
+        "pid read from a real, already-running process (the live proxy's own "
+        "/health payload, or a pid file) rather than one this test spawned "
+        "itself -- this SIGTERM'd the developer's live proxy eight times in "
+        "one test run (2026-09-05). If a test genuinely needs to signal a "
+        "real, non-test-owned process, opt in explicitly with "
+        "`@pytest.mark.allow_real_service_manager` or the "
+        "`allow_real_service_manager` fixture."
+    )
+
+
+# 2026-09-05 follow-up to the incident above: even with `_guard_real_service_manager`
+# in place, a suite run in a worktree that already had both guard commits still
+# SIGTERM'd the real, live dev proxy on port 8787 eight times. Root cause: that
+# guard only patches `os.kill` inside `headroom.install.runtime`'s own module
+# namespace (see `_RealOsKillGuardProxy` above) -- it does nothing for
+# `headroom/cli/wrap.py`, which imports the real `os` module directly and
+# reaches a REAL pid by a REAL network round-trip: `_check_proxy()` opens a
+# real socket to 127.0.0.1:8787, `query_proxy_config()` GETs its real
+# `/health` payload (which includes the real proxy's own pid), and
+# `_kill_proxy_by_pid()` sends that real pid a real `os.kill(pid, SIGTERM)`
+# (wrap.py:3647) then `os.kill(pid, SIGKILL)` (wrap.py:3663) if that doesn't
+# work. File-path isolation cannot help: the port is real no matter what HOME
+# points at.
+#
+# Two hard rules below, both autouse, both opt-out only via the existing
+# `allow_real_service_manager` marker/fixture:
+#
+# 1. `os.kill`/`os.killpg` may only signal a pid this test itself spawned
+#    (tracked by wrapping the real `subprocess.Popen.__init__`, which every
+#    one of `subprocess.run`/`.check_call`/`.check_output`/`asyncio`
+#    subprocess transports goes through, and the real
+#    `multiprocessing.process.BaseProcess.start`, which every
+#    `multiprocessing.Process`/`ProcessPoolExecutor` worker goes through) or
+#    the test process's own pid. `os.kill(pid, 0)` is exempt: POSIX signal 0
+#    never actually signals anything -- it is the standard "is this pid
+#    alive" liveness probe, used legitimately throughout the suite
+#    (`headroom._subprocess.pid_alive`'s fallback path) against pids the
+#    test did not spawn, and blocking it would break that check for no
+#    safety benefit.
+#    (2026-09-05, same day: a full-suite run surfaced a real false positive
+#    here -- `tests/test_image_compression_isolation.py::
+#    test_worker_sigsegv_fails_open_parent_survives` deliberately crashes a
+#    `ProcessPoolExecutor` worker, and the executor's own internal cleanup
+#    thread called `os.kill`/`terminate()` on that worker's pid, which this
+#    guard did not recognize because it only tracked `subprocess.Popen`
+#    pids. Fixed by also tracking `multiprocessing.process.BaseProcess.start`
+#    below.)
+# 2. Opening a real TCP connection to 127.0.0.1 / localhost / ::1 port 8787 --
+#    the developer's live Headroom proxy -- raises `ConnectionRefusedError`
+#    instead of actually connecting. No other port is touched.
+@pytest.fixture(autouse=True)
+def _guard_real_process_signals_and_proxy_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if "allow_real_service_manager" in request.fixturenames:
+        return
+    if request.node.get_closest_marker("allow_real_service_manager") is not None:
+        return
+
+    import multiprocessing.process as real_mp_process
+    import socket as real_socket
+    import subprocess as real_subprocess
+
+    allowed_pids = {os.getpid()}
+
+    real_popen_init = real_subprocess.Popen.__init__
+
+    def _tracking_popen_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        real_popen_init(self, *args, **kwargs)
+        allowed_pids.add(self.pid)
+
+    monkeypatch.setattr(real_subprocess.Popen, "__init__", _tracking_popen_init)
+
+    real_process_start = real_mp_process.BaseProcess.start
+
+    def _tracking_process_start(self: Any) -> None:
+        real_process_start(self)
+        if self.pid is not None:
+            allowed_pids.add(self.pid)
+
+    monkeypatch.setattr(real_mp_process.BaseProcess, "start", _tracking_process_start)
+
+    real_os_kill = os.kill
+
+    def _guarded_kill(pid: int, sig: int) -> None:
+        if sig != 0 and pid not in allowed_pids:
+            _raise_real_process_signal_blocked(pid)
+        real_os_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", _guarded_kill)
+
+    if hasattr(os, "killpg"):
+        real_os_killpg = os.killpg
+
+        def _guarded_killpg(pgid: int, sig: int) -> None:
+            if sig != 0 and pgid not in allowed_pids:
+                _raise_real_process_signal_blocked(pgid)
+            real_os_killpg(pgid, sig)
+
+        monkeypatch.setattr(os, "killpg", _guarded_killpg)
+
+    real_connect = real_socket.socket.connect
+    real_connect_ex = real_socket.socket.connect_ex
+
+    def _guarded_connect(self: Any, address: tuple[Any, ...] | str | bytes) -> None:
+        if _is_guarded_proxy_address(address):
+            _raise_real_proxy_network_blocked()
+        real_connect(self, address)
+
+    def _guarded_connect_ex(self: Any, address: tuple[Any, ...] | str | bytes) -> int:
+        if _is_guarded_proxy_address(address):
+            _raise_real_proxy_network_blocked()
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(real_socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(real_socket.socket, "connect_ex", _guarded_connect_ex)
     return None
 
 
@@ -401,6 +587,22 @@ def _reset_headroom_logger_propagation() -> Generator[None, None, None]:
             logger.setLevel(_logging.NOTSET)
             logger.propagate = True
     yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_warnings_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force `warnings.warn` back to the real implementation before every test.
+
+    Some optional dependencies (e.g. `crewai`) monkeypatch `warnings.warn`
+    globally at import time with a narrower signature that drops newer
+    keyword arguments (like `skip_file_prefixes`), and never undo it. Once
+    any test's collection imports one of those, `warnings.warn` stays broken
+    for the rest of the pytest session and breaks unrelated code (e.g.
+    `htmldate`'s own `warnings.warn(..., skip_file_prefixes=...)` call inside
+    `_strptime.py`). Resetting it here, before every test, means no test's
+    import order can poison another test.
+    """
+    monkeypatch.setattr(warnings, "warn", _ORIGINAL_WARNINGS_WARN)
 
 
 # =============================================================================

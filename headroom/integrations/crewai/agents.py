@@ -24,18 +24,31 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-try:
+if TYPE_CHECKING:
+    # CrewAI is an optional dependency (see `_check_crewai_available` below):
+    # at runtime `BaseTool` falls back to plain `object` when it isn't
+    # installed, so attribute accesses like `tool.description` or
+    # `self._inner.run(...)` type-check against `object` and silently widen
+    # to "unknown attribute" errors. Importing it unconditionally here, under
+    # `TYPE_CHECKING`, keeps the static type the real CrewAI `BaseTool` for
+    # every type checker regardless of what's importable at runtime.
     from crewai.tools.base_tool import BaseTool
 
-    CREWAI_AVAILABLE = True
-except ImportError:
-    CREWAI_AVAILABLE = False
-    BaseTool = object  # type: ignore[misc,assignment]
+    CREWAI_AVAILABLE: bool = True
+else:
+    try:
+        from crewai.tools.base_tool import BaseTool
+
+        CREWAI_AVAILABLE = True
+    except ImportError:
+        CREWAI_AVAILABLE = False
+        BaseTool = object  # type: ignore[misc,assignment]
 
 from headroom.integrations.mcp import compress_tool_result
 
@@ -214,7 +227,6 @@ class HeadroomToolWrapper(BaseTool):  # type: ignore[misc]
             name=tool.name,
             description=tool.description,
             args_schema=tool.args_schema,
-            result_schema=getattr(tool, "result_schema", None),
             cache_function=tool.cache_function,
             result_as_answer=tool.result_as_answer,
             max_usage_count=tool.max_usage_count,
@@ -242,6 +254,13 @@ class HeadroomToolWrapper(BaseTool):  # type: ignore[misc]
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
         """Execute the wrapped tool asynchronously and compress output.
 
+        CrewAI's `BaseTool` has no separate async entry point -- `run()` is
+        synchronous, and internally does its own `asyncio.run(...)` if `_run`
+        happens to return a coroutine. Calling that from a running event loop
+        would raise ("asyncio.run() cannot be called from a running event
+        loop"), so this offloads the synchronous `run()` call to a worker
+        thread instead of awaiting a nonexistent `arun`.
+
         Args:
             *args: Positional arguments for the tool.
             **kwargs: Keyword arguments for the tool.
@@ -249,7 +268,7 @@ class HeadroomToolWrapper(BaseTool):  # type: ignore[misc]
         Returns:
             Compressed tool output as string.
         """
-        raw = await self._inner.arun(*args, **kwargs)
+        raw = await asyncio.to_thread(self._inner.run, *args, **kwargs)
         return self._compress_and_record(str(raw))
 
     def _compress_and_record(self, output: str) -> str:

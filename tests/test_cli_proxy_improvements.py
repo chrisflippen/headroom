@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Generator
 from unittest.mock import patch
 
 import pytest
@@ -33,11 +34,11 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def mock_run_server():
+def mock_run_server() -> Generator[dict[str, object], None, None]:
     """Patch run_server to a no-op and capture the ProxyConfig passed to it."""
-    captured: dict = {}
+    captured: dict[str, object] = {}
 
-    def _mock(config, **kwargs):
+    def _mock(config: object, **kwargs: object) -> None:
         captured["config"] = config
         captured["kwargs"] = kwargs
 
@@ -303,22 +304,26 @@ class TestMissingProxyDepsError:
     def test_proxy_command_exits_when_mcp_missing(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import builtins
+        # `ensure_proxy_dependencies` checks each dependency with
+        # `importlib.import_module`, which returns straight out of
+        # `sys.modules` for anything already imported -- it never calls
+        # `builtins.__import__` for a cached module. By the time this test
+        # runs (either alone, because `headroom.cli.main` transitively
+        # imports `mcp` already, or in the full suite where some earlier
+        # test imported it), patching `builtins.__import__` is a no-op.
+        # Patch the `import_module` reference `headroom.cli.proxy` actually
+        # calls instead, so the fake failure is seen regardless of cache
+        # state.
+        import headroom.cli.proxy as proxy_module
 
-        real_import = builtins.__import__
+        real_import_module = proxy_module.import_module
 
-        def fake_import(
-            name: str,
-            globals: dict | None = None,
-            locals: dict | None = None,
-            fromlist: tuple = (),
-            level: int = 0,
-        ):
+        def fake_import_module(name: str, package: str | None = None) -> object:
             if name == "mcp":
                 raise ImportError("No module named 'mcp'")
-            return real_import(name, globals, locals, fromlist, level)
+            return real_import_module(name, package)
 
-        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr(proxy_module, "import_module", fake_import_module)
         result = runner.invoke(main, ["proxy"])
         assert result.exit_code == 1, result.output
         assert "pip install headroom-ai[proxy]" in result.output
@@ -328,27 +333,23 @@ class TestMissingProxyDepsError:
     def test_ensure_proxy_dependencies_exits_when_fastapi_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import builtins
+        # See the comment in `test_proxy_command_exits_when_mcp_missing`
+        # above: patch the `import_module` reference `ensure_proxy_dependencies`
+        # calls rather than `builtins.__import__`, which is a no-op once
+        # `fastapi` is already cached in `sys.modules`.
+        import headroom.cli.proxy as proxy_module
 
-        from headroom.cli.proxy import ensure_proxy_dependencies
+        real_import_module = proxy_module.import_module
 
-        real_import = builtins.__import__
-
-        def fake_import(
-            name: str,
-            globals: dict | None = None,
-            locals: dict | None = None,
-            fromlist: tuple = (),
-            level: int = 0,
-        ):
+        def fake_import_module(name: str, package: str | None = None) -> object:
             if name == "fastapi":
                 raise ImportError("No module named 'fastapi'")
-            return real_import(name, globals, locals, fromlist, level)
+            return real_import_module(name, package)
 
-        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr(proxy_module, "import_module", fake_import_module)
 
         with pytest.raises(SystemExit) as exc_info:
-            ensure_proxy_dependencies()
+            proxy_module.ensure_proxy_dependencies()
 
         assert exc_info.value.code == 1
 
@@ -357,7 +358,7 @@ class TestKeyboardInterruptExitCode:
     """Ctrl+C during proxy run should exit 130 (SIGINT convention)."""
 
     def test_keyboard_interrupt_exits_130(self, runner: CliRunner) -> None:
-        def _run_server_raises(*args, **kwargs):
+        def _run_server_raises(*args: object, **kwargs: object) -> None:
             raise KeyboardInterrupt
 
         with patch("headroom.proxy.server.run_server", _run_server_raises):

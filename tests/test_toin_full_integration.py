@@ -6,10 +6,14 @@ Run with: pytest tests/test_toin_full_integration.py -v -s
 The -s flag is important to see print() output showing TOIN in action.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,7 +31,7 @@ from headroom.transforms.smart_crusher import SmartCrusher, SmartCrusherConfig
 
 
 @pytest.fixture(autouse=True)
-def reset_globals():
+def reset_globals() -> Iterator[None]:
     """Reset global TOIN state before and after each test."""
     reset_toin()
     yield
@@ -35,7 +39,7 @@ def reset_globals():
 
 
 @pytest.fixture
-def fresh_toin():
+def fresh_toin() -> Iterator[ToolIntelligenceNetwork]:
     """Create a fresh TOIN instance with temp storage."""
     with tempfile.TemporaryDirectory() as tmpdir:
         storage_path = str(Path(tmpdir) / "toin_test.json")
@@ -45,7 +49,7 @@ def fresh_toin():
 
 
 @pytest.fixture
-def sample_tool_signature():
+def sample_tool_signature() -> ToolSignature:
     """Create a sample tool signature from realistic data."""
     items = [
         {"id": i, "name": f"item_{i}", "status": "active", "score": 0.5 + i * 0.1}
@@ -55,7 +59,7 @@ def sample_tool_signature():
 
 
 @pytest.fixture
-def sample_items():
+def sample_items() -> list[dict[str, Any]]:
     """Generate sample tool output items for testing."""
     return [
         {"id": i, "name": f"item_{i}", "status": "active", "score": 0.5 + i * 0.1}
@@ -66,11 +70,24 @@ def sample_items():
 class TestTOINDefaultStoragePath:
     """Test 1: Verify TOINConfig default storage path behavior."""
 
-    def test_toin_default_storage_path_exists(self):
+    def test_toin_default_storage_path_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Verify that TOINConfig now defaults to a storage path."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_default_storage_path_exists")
         print("=" * 60)
+
+        # `tests/conftest.py`'s `_isolate_headroom_home` autouse fixture always
+        # sets HEADROOM_WORKSPACE_DIR/HEADROOM_CONFIG_DIR to disposable
+        # directories that are deliberately *not* named ".headroom" (so tests
+        # can never mistake them for the real thing). Clear both and patch
+        # `Path.home()` instead, so the default really does resolve as
+        # `<home>/.headroom/toin.json` the way production does (see
+        # `headroom.paths.workspace_dir`), matching what this test asserts.
+        monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("HEADROOM_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Create config without specifying storage_path
         config = TOINConfig()
@@ -94,7 +111,7 @@ class TestTOINDefaultStoragePath:
 
         print("\n[PASS] Default storage path is correctly configured")
 
-    def test_headroom_toin_path_env_var(self):
+    def test_headroom_toin_path_env_var(self) -> None:
         """Verify HEADROOM_TOIN_PATH env var overrides default."""
         print("\n" + "=" * 60)
         print("TEST: test_headroom_toin_path_env_var")
@@ -132,11 +149,24 @@ class TestTOINDefaultStoragePath:
             else:
                 os.environ[TOIN_PATH_ENV_VAR] = original_value
 
-    def test_empty_env_var_uses_default(self):
+    def test_empty_env_var_uses_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """Verify empty HEADROOM_TOIN_PATH falls back to default."""
         print("\n" + "=" * 60)
         print("TEST: test_empty_env_var_uses_default")
         print("=" * 60)
+
+        # `tests/conftest.py`'s `_isolate_headroom_home` autouse fixture always
+        # sets HEADROOM_WORKSPACE_DIR/HEADROOM_CONFIG_DIR to disposable
+        # directories that are deliberately *not* named ".headroom" (so tests
+        # can never mistake them for the real thing). Clear both and patch
+        # `Path.home()` instead, so the default really does resolve as
+        # `<home>/.headroom/toin.json` the way production does (see
+        # `headroom.paths.workspace_dir`), matching what this test asserts.
+        monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("HEADROOM_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         original_value = os.environ.get(TOIN_PATH_ENV_VAR)
 
@@ -165,7 +195,7 @@ class TestTOINDefaultStoragePath:
 class TestTOINPersistenceAcrossInstances:
     """Test 2: Verify TOIN persistence across instances."""
 
-    def test_toin_persistence_across_instances(self, sample_tool_signature):
+    def test_toin_persistence_across_instances(self, sample_tool_signature: ToolSignature) -> None:
         """Verify patterns persist when creating new TOIN instances."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_persistence_across_instances")
@@ -253,7 +283,7 @@ class TestTOINPersistenceAcrossInstances:
 class TestTOINFullFeedbackLoop:
     """Test 3: Verify TOIN feedback loop with recommendations."""
 
-    def test_toin_full_feedback_loop(self, sample_tool_signature):
+    def test_toin_full_feedback_loop(self, sample_tool_signature: ToolSignature) -> None:
         """Verify TOIN learns from high retrieval rate and recommends skip."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_full_feedback_loop")
@@ -293,6 +323,7 @@ class TestTOINFullFeedbackLoop:
 
             # Get pattern stats
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
+            assert pattern is not None, "Pattern should exist after recording compressions"
             print("\n--- Pattern Stats ---")
             print(f"  total_compressions: {pattern.total_compressions}")
             print(f"  total_retrievals: {pattern.total_retrievals}")
@@ -300,35 +331,30 @@ class TestTOINFullFeedbackLoop:
             print(f"  full_retrieval_rate: {pattern.full_retrieval_rate:.1%}")
             print(f"  skip_compression_recommended: {pattern.skip_compression_recommended}")
 
-            # Get recommendation
-            print("\n--- Getting Recommendation ---")
-            hint = toin.get_recommendation(sample_tool_signature)
-            print(f"  source: {hint.source}")
-            print(f"  skip_compression: {hint.skip_compression}")
-            print(f"  compression_level: {hint.compression_level}")
-            print(f"  max_items: {hint.max_items}")
-            print(f"  confidence: {hint.confidence:.3f}")
-            print(f"  reason: {hint.reason}")
-            print(f"  based_on_samples: {hint.based_on_samples}")
+            # `get_recommendation` is deprecated and always returns `None` (see
+            # `headroom.telemetry.toin.ToolIntelligenceNetwork.get_recommendation`
+            # — PR-B5 retired the request-time hint API in favor of the offline
+            # `headroom.cli.toin_publish` -> `recommendations.toml` pipeline).
+            # This whole test class is skipped for that reason; we only assert
+            # the deprecation contract here (call returns `None`) rather than
+            # pretending the retired hint fields still exist.
+            # `get_recommendation` is declared `-> None`, so the type checker
+            # already proves it never returns a value — call it (for its
+            # deprecation-warning side effect) without capturing a result.
+            print("\n--- Getting Recommendation (deprecated, expect None) ---")
+            toin.get_recommendation(sample_tool_signature)
 
-            # Verify high retrieval rate triggers skip recommendation
+            # Verify high retrieval rate is tracked on the pattern itself, since
+            # that's what the (now offline) recommendation pipeline consumes.
             # With 60% retrieval rate (3/5) and full_retrieval_rate of 100% (3/3),
-            # TOIN should recommend skipping compression
+            # the pattern should reflect a high retrieval rate.
             retrieval_rate = pattern.retrieval_rate
             assert retrieval_rate >= 0.5, (
                 f"Expected retrieval rate >= 50%, got {retrieval_rate:.1%}"
             )
 
-            # With high retrieval rate and high full retrieval rate, should skip
             if pattern.full_retrieval_rate > 0.8:
-                assert hint.skip_compression or hint.compression_level in (
-                    "none",
-                    "conservative",
-                ), (
-                    f"High full retrieval rate should trigger skip or conservative, "
-                    f"got compression_level={hint.compression_level}"
-                )
-                print("\n[PASS] High retrieval rate correctly influences recommendation")
+                print("\n[PASS] High retrieval rate correctly reflected on pattern")
             else:
                 print("\n[INFO] Full retrieval rate not high enough for skip recommendation")
                 print(f"       full_retrieval_rate: {pattern.full_retrieval_rate:.1%}")
@@ -342,7 +368,7 @@ class TestTOINFullFeedbackLoop:
 class TestTOINProgressiveConfidence:
     """Test 4: Verify TOIN confidence increases with sample size."""
 
-    def test_toin_progressive_confidence(self, sample_tool_signature):
+    def test_toin_progressive_confidence(self, sample_tool_signature: ToolSignature) -> None:
         """Verify confidence increases with more samples."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_progressive_confidence")
@@ -369,11 +395,14 @@ class TestTOINProgressiveConfidence:
                 strategy="smart_sample",
             )
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
-            hint = toin.get_recommendation(sample_tool_signature)
+            assert pattern is not None, "Pattern should exist after recording compressions"
+            # `get_recommendation` is retired and declared `-> None` (see PR-B5);
+            # called here only for its deprecation-warning side effect, not for
+            # a return value.
+            toin.get_recommendation(sample_tool_signature)
             confidence_history.append(pattern.confidence)
             print(f"  sample_size: {pattern.sample_size}")
             print(f"  confidence: {pattern.confidence:.3f}")
-            print(f"  hint.source: {hint.source}")
 
             # Batch 2: Record 2 more compressions
             print("\n--- Batch 2: +2 compressions (total: 3) ---")
@@ -387,11 +416,14 @@ class TestTOINProgressiveConfidence:
                     strategy="smart_sample",
                 )
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
-            hint = toin.get_recommendation(sample_tool_signature)
+            assert pattern is not None, "Pattern should exist after recording compressions"
+            # `get_recommendation` is retired and declared `-> None` (see PR-B5);
+            # called here only for its deprecation-warning side effect, not for
+            # a return value.
+            toin.get_recommendation(sample_tool_signature)
             confidence_history.append(pattern.confidence)
             print(f"  sample_size: {pattern.sample_size}")
             print(f"  confidence: {pattern.confidence:.3f}")
-            print(f"  hint.source: {hint.source}")
 
             # Batch 3: Record 2 more compressions
             print("\n--- Batch 3: +2 compressions (total: 5) ---")
@@ -405,11 +437,14 @@ class TestTOINProgressiveConfidence:
                     strategy="smart_sample",
                 )
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
-            hint = toin.get_recommendation(sample_tool_signature)
+            assert pattern is not None, "Pattern should exist after recording compressions"
+            # `get_recommendation` is retired and declared `-> None` (see PR-B5);
+            # called here only for its deprecation-warning side effect, not for
+            # a return value.
+            toin.get_recommendation(sample_tool_signature)
             confidence_history.append(pattern.confidence)
             print(f"  sample_size: {pattern.sample_size}")
             print(f"  confidence: {pattern.confidence:.3f}")
-            print(f"  hint.source: {hint.source}")
 
             # Batch 4: Add many more to boost confidence
             print("\n--- Batch 4: +15 compressions (total: 20) ---")
@@ -423,11 +458,14 @@ class TestTOINProgressiveConfidence:
                     strategy="smart_sample",
                 )
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
-            hint = toin.get_recommendation(sample_tool_signature)
+            assert pattern is not None, "Pattern should exist after recording compressions"
+            # `get_recommendation` is retired and declared `-> None` (see PR-B5);
+            # called here only for its deprecation-warning side effect, not for
+            # a return value.
+            toin.get_recommendation(sample_tool_signature)
             confidence_history.append(pattern.confidence)
             print(f"  sample_size: {pattern.sample_size}")
             print(f"  confidence: {pattern.confidence:.3f}")
-            print(f"  hint.source: {hint.source}")
 
             # Print confidence progression
             print("\n--- Confidence Progression ---")
@@ -452,7 +490,7 @@ class TestTOINProgressiveConfidence:
 class TestTOINWithSmartCrusher:
     """Test 5: Verify TOIN integration with SmartCrusher."""
 
-    def test_toin_with_smartcrusher(self, sample_items):
+    def test_toin_with_smartcrusher(self, sample_items: list[dict[str, Any]]) -> None:
         """Verify SmartCrusher records compressions to TOIN."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_with_smartcrusher")
@@ -530,7 +568,7 @@ class TestTOINWithSmartCrusher:
 class TestTOINStatsOutput:
     """Test 6: Verify TOIN stats output format and content."""
 
-    def test_toin_stats_output(self, sample_tool_signature):
+    def test_toin_stats_output(self, sample_tool_signature: ToolSignature) -> None:
         """Exercise TOIN and verify stats output."""
         print("\n" + "=" * 60)
         print("TEST: test_toin_stats_output")
@@ -599,6 +637,7 @@ class TestTOINStatsOutput:
 
             # Get pattern details
             pattern = toin.get_pattern(sample_tool_signature.structure_hash)
+            assert pattern is not None, "Pattern should exist after recording compressions"
             print("\n--- Pattern Details ---")
             print(f"  tool_signature_hash: {pattern.tool_signature_hash}")
             print(f"  total_compressions: {pattern.total_compressions}")
@@ -627,7 +666,7 @@ class TestTOINStatsOutput:
 class TestTOINGlobalSingleton:
     """Test the global TOIN singleton behavior."""
 
-    def test_get_toin_singleton(self):
+    def test_get_toin_singleton(self) -> None:
         """Verify get_toin returns the same instance."""
         print("\n" + "=" * 60)
         print("TEST: test_get_toin_singleton")
@@ -643,7 +682,7 @@ class TestTOINGlobalSingleton:
         assert toin1 is toin2, "get_toin should return the same instance"
         print("\n[PASS] get_toin returns singleton")
 
-    def test_reset_toin_creates_new_instance(self):
+    def test_reset_toin_creates_new_instance(self) -> None:
         """Verify reset_toin creates a new instance."""
         print("\n" + "=" * 60)
         print("TEST: test_reset_toin_creates_new_instance")
@@ -663,7 +702,9 @@ class TestTOINGlobalSingleton:
 class TestTOINFieldLearning:
     """Test TOIN field-level semantic learning."""
 
-    def test_field_retrieval_tracking(self, fresh_toin, sample_tool_signature):
+    def test_field_retrieval_tracking(
+        self, fresh_toin: ToolIntelligenceNetwork, sample_tool_signature: ToolSignature
+    ) -> None:
         """Verify TOIN tracks which fields are frequently retrieved."""
         print("\n" + "=" * 60)
         print("TEST: test_field_retrieval_tracking")
@@ -694,6 +735,7 @@ class TestTOINFieldLearning:
 
         # Check pattern
         pattern = fresh_toin.get_pattern(sample_tool_signature.structure_hash)
+        assert pattern is not None, "Pattern should exist after recording compressions"
         print("\n--- Field Retrieval Frequency ---")
         for field_hash, count in pattern.field_retrieval_frequency.items():
             print(f"  {field_hash}: {count} retrievals")

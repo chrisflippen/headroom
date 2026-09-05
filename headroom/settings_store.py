@@ -518,6 +518,21 @@ SETTINGS: tuple[SettingField, ...] = (
         tier="advanced",
     ),
     SettingField(
+        "HEADROOM_RETRY_OVERLOAD",
+        "retry_overload",
+        "Retry on 429/529",
+        "Timeouts",
+        "bool",
+        default=False,
+        help=(
+            "Retry an upstream 429 (rate limit) or 529 (overloaded) with backoff "
+            "instead of forwarding it to the client immediately. Default: off — "
+            "Claude Code already handles 429/529 itself, but only if it sees the "
+            "status promptly."
+        ),
+        tier="advanced",
+    ),
+    SettingField(
         "HEADROOM_RETRY_BASE_DELAY_MS",
         "retry_base_delay_ms",
         "Retry base delay (ms)",

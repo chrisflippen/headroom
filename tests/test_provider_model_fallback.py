@@ -1,9 +1,13 @@
 """Tests for provider model fallback and configuration."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,10 +30,29 @@ from headroom.providers.openai import (
 )
 
 
+@contextmanager
+def _home_patched_to(tmpdir: str) -> Iterator[None]:
+    """Patch `Path.home()` in a way that actually affects config resolution.
+
+    `tests/conftest.py`'s `_isolate_headroom_home` autouse fixture always sets
+    `HEADROOM_WORKSPACE_DIR`/`HEADROOM_CONFIG_DIR`, and the loaders under test
+    (`headroom.paths.config_dir`/`workspace_dir`, used transitively by
+    `_load_custom_model_config`) check those env vars *before* falling back to
+    `Path.home()`. Clearing them here (to `""`, which `headroom.paths._env`
+    treats as unset) means patching `Path.home()` actually determines where
+    `models.json` resolves, matching what these tests assert against.
+    """
+    with (
+        patch.object(Path, "home", return_value=Path(tmpdir)),
+        patch.dict(os.environ, {"HEADROOM_WORKSPACE_DIR": "", "HEADROOM_CONFIG_DIR": ""}),
+    ):
+        yield
+
+
 class TestGoogleModelFallback:
     """Tests for Google provider model fallback."""
 
-    def test_future_gemini_model_uses_registry_family_fallback(self):
+    def test_future_gemini_model_uses_registry_family_fallback(self) -> None:
         """Future Gemini models should not hard-fail token counting."""
         provider = GoogleProvider()
 
@@ -41,7 +64,7 @@ class TestGoogleModelFallback:
                 GeminiTokenCounter,
             )
 
-    def test_litellm_prefixed_gemini_model_uses_registry_family_fallback(self):
+    def test_litellm_prefixed_gemini_model_uses_registry_family_fallback(self) -> None:
         """LiteLLM-style Gemini ids should resolve through the Google provider."""
         provider = GoogleProvider()
 
@@ -49,7 +72,7 @@ class TestGoogleModelFallback:
             assert provider.supports_model("gemini/gemini-3-pro-preview")
             assert provider.get_context_limit("gemini/gemini-3-pro-preview") == 1000000
 
-    def test_google_legacy_context_limits_are_preserved(self):
+    def test_google_legacy_context_limits_are_preserved(self) -> None:
         """Moving lookup through ModelRegistry must keep legacy Gemini limits."""
         provider = GoogleProvider()
 
@@ -57,7 +80,7 @@ class TestGoogleModelFallback:
             assert provider.get_context_limit("gemini-1.5-pro-latest") == 2000000
             assert provider.get_context_limit("gemini-1.0-pro") == 32768
 
-    def test_unknown_non_gemini_model_still_rejected(self):
+    def test_unknown_non_gemini_model_still_rejected(self) -> None:
         """The Google provider should not claim unrelated unknown models."""
         provider = GoogleProvider()
 
@@ -70,7 +93,7 @@ class TestGoogleModelFallback:
 class TestAnthropicModelFallback:
     """Tests for Anthropic provider model fallback."""
 
-    def test_known_claude_4_models(self):
+    def test_known_claude_4_models(self) -> None:
         """Test that Claude 4/4.5 models are recognized."""
         provider = AnthropicProvider()
 
@@ -86,7 +109,7 @@ class TestAnthropicModelFallback:
         assert provider.get_context_limit("claude-haiku-4-5-20251001") == 200000
         assert provider.supports_model("claude-haiku-4-5-20251001")
 
-    def test_pattern_based_inference_opus(self):
+    def test_pattern_based_inference_opus(self) -> None:
         """Test pattern-based inference for opus models."""
         provider = AnthropicProvider()
 
@@ -95,10 +118,11 @@ class TestAnthropicModelFallback:
         assert limit == 200000
 
         pricing = provider._get_pricing("claude-opus-5-20260101")
+        assert pricing is not None
         assert pricing["input"] == 5.00
         assert pricing["output"] == 25.00
 
-    def test_pattern_based_inference_sonnet(self):
+    def test_pattern_based_inference_sonnet(self) -> None:
         """Test pattern-based inference for sonnet models."""
         provider = AnthropicProvider()
 
@@ -106,10 +130,11 @@ class TestAnthropicModelFallback:
         assert limit == 200000
 
         pricing = provider._get_pricing("claude-sonnet-6-20260101")
+        assert pricing is not None
         assert pricing["input"] == 3.00
         assert pricing["output"] == 15.00
 
-    def test_pattern_based_inference_haiku(self):
+    def test_pattern_based_inference_haiku(self) -> None:
         """Test pattern-based inference for haiku models."""
         provider = AnthropicProvider()
 
@@ -117,10 +142,11 @@ class TestAnthropicModelFallback:
         assert limit == 200000
 
         pricing = provider._get_pricing("claude-haiku-5-20260101")
+        assert pricing is not None
         assert pricing["input"] == 0.80
         assert pricing["output"] == 4.00
 
-    def test_unknown_claude_model_fallback(self):
+    def test_unknown_claude_model_fallback(self) -> None:
         """Test fallback for unknown Claude models."""
         provider = AnthropicProvider()
 
@@ -131,7 +157,7 @@ class TestAnthropicModelFallback:
         # Should still support it
         assert provider.supports_model("claude-unknown-model")
 
-    def test_no_exception_for_unknown_model(self):
+    def test_no_exception_for_unknown_model(self) -> None:
         """Test that unknown models don't raise exceptions."""
         provider = AnthropicProvider()
 
@@ -139,7 +165,7 @@ class TestAnthropicModelFallback:
         limit = provider.get_context_limit("claude-future-model-xyz")
         assert limit > 0
 
-    def test_infer_model_tier(self):
+    def test_infer_model_tier(self) -> None:
         """Test model tier inference."""
         assert _infer_model_tier("claude-opus-4-5-20251101") == "opus"
         assert _infer_model_tier("claude-sonnet-4-20250514") == "sonnet"
@@ -148,23 +174,24 @@ class TestAnthropicModelFallback:
         assert _infer_model_tier("CLAUDE-OPUS-FUTURE") == "opus"  # Case insensitive
         assert _infer_model_tier("some-other-model") is None
 
-    def test_explicit_context_limits_override(self):
+    def test_explicit_context_limits_override(self) -> None:
         """Test that explicit context_limits override defaults."""
         provider = AnthropicProvider(context_limits={"custom-model": 500000})
 
         assert provider.get_context_limit("custom-model") == 500000
 
-    def test_pricing_for_known_models(self):
+    def test_pricing_for_known_models(self) -> None:
         """Test pricing retrieval for known models."""
         provider = AnthropicProvider()
 
         # Claude Opus 4.5
         pricing = provider._get_pricing("claude-opus-4-5-20251101")
+        assert pricing is not None
         assert pricing["input"] == 5.00
         assert pricing["output"] == 25.00
         assert pricing["cached_input"] == 0.50
 
-    def test_cost_estimation_for_new_models(self):
+    def test_cost_estimation_for_new_models(self) -> None:
         """Test cost estimation works for new models."""
         provider = AnthropicProvider()
 
@@ -182,7 +209,7 @@ class TestAnthropicModelFallback:
 class TestAnthropicConfigLoading:
     """Tests for Anthropic config file/env var loading."""
 
-    def test_load_from_env_var_json(self):
+    def test_load_from_env_var_json(self) -> None:
         """Test loading config from JSON env var."""
         config = {"context_limits": {"test-model": 300000}}
 
@@ -190,7 +217,7 @@ class TestAnthropicConfigLoading:
             loaded = anthropic_load_config()
             assert loaded["context_limits"]["test-model"] == 300000
 
-    def test_load_from_env_var_file(self):
+    def test_load_from_env_var_file(self) -> None:
         """Test loading config from file path in env var."""
         config = {"context_limits": {"file-model": 400000}}
 
@@ -202,7 +229,7 @@ class TestAnthropicConfigLoading:
                 loaded = anthropic_load_config()
                 assert loaded["context_limits"]["file-model"] == 400000
 
-    def test_load_from_config_file(self):
+    def test_load_from_config_file(self) -> None:
         """Test loading from ~/.headroom/models.json."""
         config = {
             "anthropic": {
@@ -217,11 +244,11 @@ class TestAnthropicConfigLoading:
             config_file = config_dir / "models.json"
             config_file.write_text(json.dumps(config))
 
-            with patch.object(Path, "home", return_value=Path(tmpdir)):
+            with _home_patched_to(tmpdir):
                 loaded = anthropic_load_config()
                 assert loaded["context_limits"]["config-model"] == 250000
 
-    def test_env_var_overrides_config_file(self):
+    def test_env_var_overrides_config_file(self) -> None:
         """Test that env var takes precedence over config file."""
         env_config = {"context_limits": {"test-model": 100000}}
         file_config = {"anthropic": {"context_limits": {"test-model": 200000}}}
@@ -232,21 +259,23 @@ class TestAnthropicConfigLoading:
             config_file = config_dir / "models.json"
             config_file.write_text(json.dumps(file_config))
 
-            with patch.object(Path, "home", return_value=Path(tmpdir)):
+            with _home_patched_to(tmpdir):
                 with patch.dict(os.environ, {"HEADROOM_MODEL_LIMITS": json.dumps(env_config)}):
                     loaded = anthropic_load_config()
                     # Env var should win
                     assert loaded["context_limits"]["test-model"] == 100000
 
     @pytest.mark.parametrize("raw", ["[1, 2, 3]", '"gpt-4"', "42", "true", "null"])
-    def test_non_object_env_var_falls_back_to_defaults(self, raw):
+    def test_non_object_env_var_falls_back_to_defaults(self, raw: str) -> None:
         """A valid-JSON-but-not-an-object env var must warn and use defaults,
         not crash provider init with AttributeError on ``loaded.get``."""
         with patch.dict(os.environ, {"HEADROOM_MODEL_LIMITS": raw}):
             loaded = anthropic_load_config()
             assert loaded == {"context_limits": {}, "pricing": {}}
 
-    def test_flat_shape_env_var_warns_that_it_had_no_effect(self, caplog):
+    def test_flat_shape_env_var_warns_that_it_had_no_effect(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A JSON *object* using the intuitive-but-wrong flat shape
         ``{"my-model": 262144}`` is silently ignored by the loader.
 
@@ -262,7 +291,7 @@ class TestAnthropicConfigLoading:
         assert "NO EFFECT" in caplog.text
         assert "context_limits" in caplog.text
 
-    def test_correct_shape_env_var_does_not_warn(self, caplog):
+    def test_correct_shape_env_var_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
         """The documented nested shape must apply cleanly and stay silent."""
         cfg = '{"context_limits": {"qwen3.8": 262144}}'
         with patch.dict(os.environ, {"HEADROOM_MODEL_LIMITS": cfg}):
@@ -271,7 +300,9 @@ class TestAnthropicConfigLoading:
         assert loaded["context_limits"]["qwen3.8"] == 262144
         assert "NO EFFECT" not in caplog.text
 
-    def test_other_provider_namespaced_env_var_does_not_warn(self, caplog):
+    def test_other_provider_namespaced_env_var_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """``{"openai": {"context_limits": ...}}`` is the documented shape for the
         OpenAI loader. The Anthropic loader consumes nothing from it, which is
         correct, so it must not claim the config had no effect."""
@@ -282,7 +313,9 @@ class TestAnthropicConfigLoading:
         assert loaded == {"context_limits": {}, "pricing": {}}
         assert "NO EFFECT" not in caplog.text
 
-    def test_anthropic_section_without_known_keys_still_warns(self, caplog):
+    def test_anthropic_section_without_known_keys_still_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """An explicit ``anthropic`` section that carries none of the consumed
         keys is the same silent no-op as the flat shape, so it warns."""
         cfg = '{"anthropic": {"qwen3.8": 262144}}'
@@ -291,14 +324,14 @@ class TestAnthropicConfigLoading:
                 anthropic_load_config()
         assert "NO EFFECT" in caplog.text
 
-    def test_non_object_config_file_falls_back_to_defaults(self):
+    def test_non_object_config_file_falls_back_to_defaults(self) -> None:
         """A models.json whose top level is not an object must not crash."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_dir = Path(tmpdir) / ".headroom"
             config_dir.mkdir()
             (config_dir / "models.json").write_text("[1, 2, 3]")
 
-            with patch.object(Path, "home", return_value=Path(tmpdir)):
+            with _home_patched_to(tmpdir):
                 loaded = anthropic_load_config()
                 assert loaded == {"context_limits": {}, "pricing": {}}
 
@@ -306,7 +339,7 @@ class TestAnthropicConfigLoading:
 class TestOpenAIModelFallback:
     """Tests for OpenAI provider model fallback."""
 
-    def test_known_models(self):
+    def test_known_models(self) -> None:
         """Test that known models work."""
         provider = OpenAIProvider()
 
@@ -315,7 +348,7 @@ class TestOpenAIModelFallback:
         assert provider.get_context_limit("o1") == 200000
         assert provider.get_context_limit("o3-mini") == 200000
 
-    def test_pattern_based_inference_gpt4o(self):
+    def test_pattern_based_inference_gpt4o(self) -> None:
         """Test pattern-based inference for gpt-4o models."""
         provider = OpenAIProvider()
 
@@ -323,21 +356,21 @@ class TestOpenAIModelFallback:
         limit = provider.get_context_limit("gpt-4o-2025-01-01")
         assert limit == 128000
 
-    def test_pattern_based_inference_o1(self):
+    def test_pattern_based_inference_o1(self) -> None:
         """Test pattern-based inference for o1 models."""
         provider = OpenAIProvider()
 
         limit = provider.get_context_limit("o1-super-2025")
         assert limit == 200000
 
-    def test_pattern_based_inference_o3(self):
+    def test_pattern_based_inference_o3(self) -> None:
         """Test pattern-based inference for o3 models."""
         provider = OpenAIProvider()
 
         limit = provider.get_context_limit("o3-large-2025")
         assert limit == 200000
 
-    def test_unknown_model_fallback(self):
+    def test_unknown_model_fallback(self) -> None:
         """Test fallback for unknown models."""
         provider = OpenAIProvider()
 
@@ -347,7 +380,7 @@ class TestOpenAIModelFallback:
         limit = provider.get_context_limit("gpt-9-imaginary")
         assert limit == 128000
 
-    def test_unknown_variant_inherits_its_family_limit(self):
+    def test_unknown_variant_inherits_its_family_limit(self) -> None:
         """An unrecognized variant of a *known* family takes that family's limit.
 
         This is the same prefix inheritance that gives "gpt-4o-2024-11-20" the
@@ -359,7 +392,7 @@ class TestOpenAIModelFallback:
         assert provider.get_context_limit("gpt-5-future") == 272000
         assert provider.get_context_limit("gpt-4.1-preview") == 1_047_576
 
-    def test_no_exception_for_unknown_model(self):
+    def test_no_exception_for_unknown_model(self) -> None:
         """Test that unknown models don't raise exceptions."""
         provider = OpenAIProvider()
 
@@ -367,7 +400,7 @@ class TestOpenAIModelFallback:
         limit = provider.get_context_limit("gpt-future-xyz")
         assert limit > 0
 
-    def test_infer_model_family(self):
+    def test_infer_model_family(self) -> None:
         """Test model family inference."""
         assert _infer_model_family("gpt-4o-2024-11-20") == "gpt-4o"
         assert _infer_model_family("gpt-4-turbo-preview") == "gpt-4-turbo"
@@ -377,13 +410,13 @@ class TestOpenAIModelFallback:
         assert _infer_model_family("o3-mini") == "o3"
         assert _infer_model_family("unknown") is None
 
-    def test_explicit_context_limits_override(self):
+    def test_explicit_context_limits_override(self) -> None:
         """Test that explicit context_limits override defaults."""
         provider = OpenAIProvider(context_limits={"custom-model": 500000})
 
         assert provider.get_context_limit("custom-model") == 500000
 
-    def test_supports_model_expanded(self):
+    def test_supports_model_expanded(self) -> None:
         """Test that supports_model works for new patterns."""
         provider = OpenAIProvider()
 
@@ -398,7 +431,7 @@ class TestOpenAIModelFallback:
 class TestOpenAIConfigLoading:
     """Tests for OpenAI config file/env var loading."""
 
-    def test_load_from_env_var_json(self):
+    def test_load_from_env_var_json(self) -> None:
         """Test loading config from JSON env var."""
         config = {"openai": {"context_limits": {"test-model": 300000}}}
 
@@ -406,7 +439,7 @@ class TestOpenAIConfigLoading:
             loaded = openai_load_config()
             assert loaded["context_limits"]["test-model"] == 300000
 
-    def test_load_pricing_from_config(self):
+    def test_load_pricing_from_config(self) -> None:
         """Test loading pricing from config."""
         config = {"openai": {"pricing": {"test-model": [5.0, 15.0]}}}
 
@@ -419,7 +452,7 @@ class TestOpenAIConfigLoading:
                 assert loaded["pricing"]["test-model"] == [5.0, 15.0]
 
     @pytest.mark.parametrize("raw", ["[1, 2, 3]", '"gpt-4"', "42", "true", "null"])
-    def test_non_object_env_var_falls_back_to_defaults(self, raw):
+    def test_non_object_env_var_falls_back_to_defaults(self, raw: str) -> None:
         """A valid-JSON-but-not-an-object env var must warn and use defaults,
         not crash provider init with AttributeError on ``loaded.get``."""
         with patch.dict(os.environ, {"HEADROOM_MODEL_LIMITS": raw}):
@@ -430,7 +463,7 @@ class TestOpenAIConfigLoading:
 class TestCrossProviderConsistency:
     """Tests for consistency across providers."""
 
-    def test_both_providers_use_same_env_var(self):
+    def test_both_providers_use_same_env_var(self) -> None:
         """Test that both providers use HEADROOM_MODEL_LIMITS."""
         config = {
             "anthropic": {"context_limits": {"anthropic-model": 100000}},
@@ -444,7 +477,7 @@ class TestCrossProviderConsistency:
             assert anthropic["context_limits"]["anthropic-model"] == 100000
             assert openai["context_limits"]["openai-model"] == 200000
 
-    def test_both_providers_never_raise_for_unknown_models(self):
+    def test_both_providers_never_raise_for_unknown_models(self) -> None:
         """Test that neither provider raises for unknown models."""
         anthropic = AnthropicProvider()
         openai = OpenAIProvider()
@@ -453,7 +486,7 @@ class TestCrossProviderConsistency:
         anthropic.get_context_limit("claude-future-model-xyz")
         openai.get_context_limit("gpt-future-model-xyz")
 
-    def test_both_providers_warn_for_unknown_models(self):
+    def test_both_providers_warn_for_unknown_models(self) -> None:
         """Test that both providers warn for unknown models."""
         # Clear warning caches
         from headroom.providers import anthropic as anthropic_module

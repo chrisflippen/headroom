@@ -9,11 +9,13 @@ Tests cover:
 """
 
 from datetime import datetime
-from unittest.mock import patch
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
+    from crewai.tools.base_tool import BaseTool
     from crewai.tools.base_tool import tool as crewai_tool
 
     CREWAI_AVAILABLE = True
@@ -33,7 +35,7 @@ def _make_large_output(n: int = 200) -> str:
 class TestToolCompressionMetrics:
     """Tests for ToolCompressionMetrics dataclass."""
 
-    def test_create_metrics(self):
+    def test_create_metrics(self) -> None:
         from headroom.integrations.crewai.agents import ToolCompressionMetrics
 
         metrics = ToolCompressionMetrics(
@@ -51,7 +53,7 @@ class TestToolCompressionMetrics:
         assert metrics.chars_saved == 3000
         assert metrics.was_compressed is True
 
-    def test_metrics_all_fields_required(self):
+    def test_metrics_all_fields_required(self) -> None:
         from headroom.integrations.crewai.agents import ToolCompressionMetrics
 
         with pytest.raises(TypeError):
@@ -61,7 +63,7 @@ class TestToolCompressionMetrics:
 class TestToolMetricsCollector:
     """Tests for ToolMetricsCollector."""
 
-    def test_empty_summary(self):
+    def test_empty_summary(self) -> None:
         from headroom.integrations.crewai.agents import ToolMetricsCollector
 
         collector = ToolMetricsCollector()
@@ -69,7 +71,7 @@ class TestToolMetricsCollector:
         assert summary["total_invocations"] == 0
         assert summary["total_compressions"] == 0
 
-    def test_add_and_summary(self):
+    def test_add_and_summary(self) -> None:
         from headroom.integrations.crewai.agents import (
             ToolCompressionMetrics,
             ToolMetricsCollector,
@@ -94,7 +96,7 @@ class TestToolMetricsCollector:
         assert summary["total_chars_saved"] == 3000
         assert "search" in summary["by_tool"]
 
-    def test_caps_at_1000(self):
+    def test_caps_at_1000(self) -> None:
         from headroom.integrations.crewai.agents import (
             ToolCompressionMetrics,
             ToolMetricsCollector,
@@ -119,7 +121,7 @@ class TestToolMetricsCollector:
 class TestGlobalMetrics:
     """Tests for global metrics functions."""
 
-    def test_get_and_reset(self):
+    def test_get_and_reset(self) -> None:
         from headroom.integrations.crewai.agents import get_tool_metrics, reset_tool_metrics
 
         metrics = get_tool_metrics()
@@ -132,7 +134,7 @@ class TestHeadroomToolWrapper:
     """Tests for HeadroomToolWrapper."""
 
     @patch("headroom.integrations.crewai.agents.compress_tool_result")
-    def test_skips_short_output(self, mock_compress):
+    def test_skips_short_output(self, mock_compress: MagicMock) -> None:
         from headroom.integrations.crewai.agents import HeadroomToolWrapper, ToolMetricsCollector
 
         @crewai_tool
@@ -142,7 +144,7 @@ class TestHeadroomToolWrapper:
 
         collector = ToolMetricsCollector()
         wrapper = HeadroomToolWrapper(
-            small_tool,
+            cast("BaseTool", small_tool),
             min_chars_to_compress=1000,
             metrics_collector=collector,
         )
@@ -153,7 +155,7 @@ class TestHeadroomToolWrapper:
         assert collector.get_summary()["total_compressions"] == 0
 
     @patch("headroom.integrations.crewai.agents.compress_tool_result")
-    def test_compresses_large_output(self, mock_compress):
+    def test_compresses_large_output(self, mock_compress: MagicMock) -> None:
         from headroom.integrations.crewai.agents import HeadroomToolWrapper, ToolMetricsCollector
 
         large = _make_large_output()
@@ -166,7 +168,7 @@ class TestHeadroomToolWrapper:
 
         collector = ToolMetricsCollector()
         wrapper = HeadroomToolWrapper(
-            big_tool,
+            cast("BaseTool", big_tool),
             min_chars_to_compress=100,
             metrics_collector=collector,
         )
@@ -180,7 +182,7 @@ class TestHeadroomToolWrapper:
         "headroom.integrations.crewai.agents.compress_tool_result",
         side_effect=RuntimeError("boom"),
     )
-    def test_passes_through_on_error(self, mock_compress):
+    def test_passes_through_on_error(self, mock_compress: MagicMock) -> None:
         from headroom.integrations.crewai.agents import HeadroomToolWrapper, ToolMetricsCollector
 
         large = _make_large_output()
@@ -192,7 +194,7 @@ class TestHeadroomToolWrapper:
 
         collector = ToolMetricsCollector()
         wrapper = HeadroomToolWrapper(
-            flaky_tool,
+            cast("BaseTool", flaky_tool),
             min_chars_to_compress=100,
             metrics_collector=collector,
         )
@@ -201,7 +203,7 @@ class TestHeadroomToolWrapper:
         assert result == large
         assert collector.get_summary()["total_compressions"] == 0
 
-    def test_preserves_tool_metadata(self):
+    def test_preserves_tool_metadata(self) -> None:
         from headroom.integrations.crewai.agents import HeadroomToolWrapper
 
         @crewai_tool
@@ -209,16 +211,27 @@ class TestHeadroomToolWrapper:
             """Do something useful."""
             return str(x)
 
-        wrapper = HeadroomToolWrapper(my_fn)
+        # CrewAI's `BaseTool.model_post_init` runs `_generate_description()`
+        # on *every* tool -- including `my_fn` itself, before it ever reaches
+        # the wrapper -- rewriting `description` into a multi-line
+        # "Tool Name / Tool Arguments / Tool Description" block. There is no
+        # longer a plain-docstring form of `description` to compare against
+        # (older CrewAI left the raw docstring until the wrapper's own
+        # construction did the formatting), so assert against the wrapped
+        # tool's own `description` -- exactly what the wrapper is documented
+        # to inherit -- rather than a raw docstring that CrewAI no longer
+        # produces.
+        wrapper = HeadroomToolWrapper(cast("BaseTool", my_fn))
         assert wrapper.name == "my_fn"
-        assert wrapper.description == "Do something useful."
+        assert wrapper.description == cast("BaseTool", my_fn).description
+        assert "Do something useful." in wrapper.description
 
 
 class TestWrapToolsWithHeadroom:
     """Tests for wrap_tools_with_headroom convenience function."""
 
     @patch("headroom.integrations.crewai.agents.compress_tool_result")
-    def test_wraps_multiple_tools(self, mock_compress):
+    def test_wraps_multiple_tools(self, mock_compress: MagicMock) -> None:
         from headroom.integrations.crewai.agents import wrap_tools_with_headroom
 
         @crewai_tool
@@ -231,13 +244,13 @@ class TestWrapToolsWithHeadroom:
             """Tool B."""
             return "b"
 
-        wrapped = wrap_tools_with_headroom([tool_a, tool_b])
+        wrapped = wrap_tools_with_headroom([cast("BaseTool", tool_a), cast("BaseTool", tool_b)])
         assert len(wrapped) == 2
         assert wrapped[0].name == "tool_a"
         assert wrapped[1].name == "tool_b"
 
     @patch("headroom.integrations.crewai.agents.compress_tool_result")
-    def test_shared_metrics(self, mock_compress):
+    def test_shared_metrics(self, mock_compress: MagicMock) -> None:
         from headroom.integrations.crewai.agents import (
             ToolMetricsCollector,
             wrap_tools_with_headroom,
@@ -253,7 +266,7 @@ class TestWrapToolsWithHeadroom:
 
         collector = ToolMetricsCollector()
         wrapped = wrap_tools_with_headroom(
-            [big],
+            [cast("BaseTool", big)],
             min_chars_to_compress=100,
             metrics_collector=collector,
         )

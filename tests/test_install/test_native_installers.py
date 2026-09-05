@@ -265,7 +265,8 @@ def _persistent_run_call(env: dict[str, str], profile: str) -> list[str]:
 
 def _persistent_container_env(env: dict[str, str], profile: str) -> dict[str, str]:
     state = json.loads(Path(env["FAKE_DOCKER_STATE"]).read_text(encoding="utf-8"))
-    return state["containers"][f"headroom-{profile}"]["env"]
+    raw_env = state["containers"][f"headroom-{profile}"]["env"]
+    return {str(key): str(value) for key, value in raw_env.items()}
 
 
 def _exercise_dashboard_gateway_overrides(wrapper_command: list[str], env: dict[str, str]) -> None:
@@ -375,6 +376,19 @@ def _bash_supports_4_3() -> bool:
     os.name == "nt" or shutil.which("bash") is None or not _bash_supports_4_3(),
     reason="installer requires bash >= 4.3 (macOS system bash is 3.2)",
 )
+# `_cleanup_fake_docker` signals the fake docker daemon's own HTTP test
+# server, whose pid was spawned by a *grandchild* process (the fake docker
+# shim's own `subprocess.Popen` call, run inside the child `install.sh`/bash
+# process this test starts) rather than by this test process's own
+# `subprocess.Popen` -- so `_guard_real_process_signals_and_proxy_network`'s
+# pid-allowlist (populated only from `Popen` calls made directly in this
+# process) cannot see it. That pid is still entirely test-owned: it lives
+# under this test's own `tmp_path`, was created via a fake docker shim this
+# test wrote to disk itself, and never touches port 8787 or a real,
+# developer-owned process. Opt out narrowly via the same mechanism the
+# incident's guard uses everywhere else, rather than widening the pid
+# tracking to synthetically trust cross-process descendants in general.
+@pytest.mark.allow_real_service_manager
 def test_bash_native_installer_supports_persistent_docker_lifecycle(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".local").mkdir(parents=True)
@@ -569,34 +583,52 @@ def _read_user_path_entry() -> tuple[str, int] | None:
     references) and the value kind, so a ``REG_EXPAND_SZ`` -> ``REG_SZ`` downgrade cannot pass
     unnoticed.
     """
-    import winreg
+    # `winreg` only exists (and typeshed only gives it these attributes) on
+    # win32; nesting the whole body inside `if sys.platform == "win32":`
+    # makes mypy/pyrefly type-check it against the real win32-only stub
+    # (matching runtime reality -- this is only ever called from a test
+    # already skipped on non-Windows hosts) instead of erroring on an
+    # attribute-poor non-win32 stub.
+    if sys.platform == "win32":
+        import winreg
 
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-        try:
-            value, kind = winreg.QueryValueEx(key, "Path")
-        except FileNotFoundError:
-            return None
-    return str(value), int(kind)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            try:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                return None
+        return str(value), int(kind)
+    raise RuntimeError("_read_user_path_entry is Windows-only")
 
 
 def _restore_user_path_entry(previous: tuple[str, int] | None) -> None:
-    import winreg
+    if sys.platform == "win32":
+        import winreg
 
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
-        if previous is None:
-            try:
-                winreg.DeleteValue(key, "Path")
-            except FileNotFoundError:
-                pass
-            return
-        value, kind = previous
-        winreg.SetValueEx(key, "Path", 0, kind, value)
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if previous is None:
+                try:
+                    winreg.DeleteValue(key, "Path")
+                except FileNotFoundError:
+                    pass
+                return
+            value, kind = previous
+            winreg.SetValueEx(key, "Path", 0, kind, value)
+        return
+    raise RuntimeError("_restore_user_path_entry is Windows-only")
 
 
 @pytest.mark.skipif(
     os.name != "nt" or _powershell_executable() is None,
     reason="Windows PowerShell coverage runs on Windows hosts only",
 )
+# See the identical comment on
+# test_bash_native_installer_supports_persistent_docker_lifecycle: this
+# test's `finally` block also calls `_cleanup_fake_docker`, which signals a
+# grandchild-process pid the guard's Popen-tracking cannot see.
+@pytest.mark.allow_real_service_manager
 def test_powershell_installer_does_not_leak_into_user_path(tmp_path: Path) -> None:
     """The installer must not mutate the real HKCU User PATH (#2970).
 
@@ -725,6 +757,11 @@ def test_path_scope_rejects_machine_and_invalid_values(tmp_path: Path) -> None:
     os.name != "nt" or _powershell_executable() is None,
     reason="Windows PowerShell coverage runs on Windows hosts only",
 )
+# See the identical comment on
+# test_bash_native_installer_supports_persistent_docker_lifecycle: this
+# test's `finally` block also calls `_cleanup_fake_docker`, which signals a
+# grandchild-process pid the guard's Popen-tracking cannot see.
+@pytest.mark.allow_real_service_manager
 def test_powershell_native_installer_supports_persistent_docker_lifecycle(tmp_path: Path) -> None:
     powershell = _powershell_executable()
     assert powershell is not None

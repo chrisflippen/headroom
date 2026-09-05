@@ -32,8 +32,25 @@ def _manifest() -> DeploymentManifest:
     )
 
 
-def test_save_and_load_manifest_round_trip(monkeypatch, tmp_path: Path) -> None:
+def _use_tmp_path_as_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Make `Path.home()` (and therefore `headroom.paths.workspace_dir()`)
+    resolve under `tmp_path`.
+
+    `tests/conftest.py`'s `_isolate_headroom_home` autouse fixture always
+    sets `HEADROOM_WORKSPACE_DIR`/`HEADROOM_CONFIG_DIR`, and
+    `headroom.paths.workspace_dir()` checks those env vars *before* falling
+    back to `Path.home()`. Without clearing them here, `Path.home()` being
+    monkeypatched to `tmp_path` would have no effect on where manifests
+    actually land, and these tests' `tmp_path / ".headroom" / ...`
+    assertions would look at a directory nothing ever wrote to.
+    """
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("HEADROOM_CONFIG_DIR", raising=False)
+
+
+def test_save_and_load_manifest_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     manifest = _manifest()
 
     save_manifest(manifest)
@@ -46,9 +63,9 @@ def test_save_and_load_manifest_round_trip(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_load_manifest_raises_manifest_error_on_corrupt_payload(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     # Simulate a crash mid-write: a truncated/garbage manifest left on disk.
     profile_dir = tmp_path / ".headroom" / "deploy" / "default"
     profile_dir.mkdir(parents=True)
@@ -60,8 +77,8 @@ def test_load_manifest_raises_manifest_error_on_corrupt_payload(
         load_manifest("default")
 
 
-def test_save_manifest_writes_atomically(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_save_manifest_writes_atomically(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
 
     save_manifest(_manifest())
 
@@ -72,8 +89,10 @@ def test_save_manifest_writes_atomically(monkeypatch, tmp_path: Path) -> None:
     assert load_manifest("default") is not None
 
 
-def test_list_manifests_ignores_invalid_payloads(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_list_manifests_ignores_invalid_payloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     valid = _manifest()
     save_manifest(valid)
 
@@ -104,8 +123,10 @@ def _write_manifest_with_image(profile_dir: Path, image: str) -> None:
     (profile_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_load_manifest_migrates_retired_image_repo(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_load_manifest_migrates_retired_image_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     profile_dir = tmp_path / ".headroom" / "deploy" / "default"
     # A manifest written before the org move still pins the retired personal
     # repo, which is frozen at 0.27.0. Loading it must rewrite the repo while
@@ -118,8 +139,10 @@ def test_load_manifest_migrates_retired_image_repo(monkeypatch, tmp_path: Path) 
     assert loaded.image == "ghcr.io/headroomlabs-ai/headroom:latest"
 
 
-def test_load_manifest_leaves_unrelated_image_untouched(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_load_manifest_leaves_unrelated_image_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     profile_dir = tmp_path / ".headroom" / "deploy" / "default"
     _write_manifest_with_image(profile_dir, "ghcr.io/headroomlabs-ai/headroom:0.31.0")
 
@@ -131,8 +154,10 @@ def test_load_manifest_leaves_unrelated_image_untouched(monkeypatch, tmp_path: P
     assert loaded.image == "ghcr.io/headroomlabs-ai/headroom:0.31.0"
 
 
-def test_list_manifests_migrates_retired_image_repo(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_list_manifests_migrates_retired_image_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     _write_manifest_with_image(
         tmp_path / ".headroom" / "deploy" / "default",
         "ghcr.io/chopratejas/headroom:0.27.0",
@@ -143,8 +168,10 @@ def test_list_manifests_migrates_retired_image_repo(monkeypatch, tmp_path: Path)
     assert [m.image for m in manifests] == ["ghcr.io/headroomlabs-ai/headroom:0.27.0"]
 
 
-def test_delete_manifest_removes_profile_root(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_delete_manifest_removes_profile_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_tmp_path_as_home(monkeypatch, tmp_path)
     manifest = _manifest()
     save_manifest(manifest)
     extra_file = tmp_path / ".headroom" / "deploy" / "default" / "runner.log"

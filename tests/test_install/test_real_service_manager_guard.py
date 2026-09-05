@@ -54,14 +54,24 @@ def test_guard_blocks_runtime_os_kill() -> None:
         runtime.os.kill(1, 15)
 
 
-def test_guard_does_not_touch_the_real_os_kill() -> None:
-    """The guard is scoped to `headroom.install.runtime`'s own `os` name --
-    it must never mutate the real, shared `os` module used everywhere else
-    (headroom/cli/wrap.py and its tests kill real child processes they spawned
-    themselves)."""
+def test_guard_replaces_the_real_os_kill_too() -> None:
+    """As of the 2026-09-05 follow-up incident, the real global `os.kill` is
+    *also* patched -- by `_guard_real_process_signals_and_proxy_network` in
+    `tests/conftest.py`, a second, independent guard from the one this file
+    otherwise exercises. `headroom/cli/wrap.py` imports the real `os` module
+    directly (not through `headroom.install.runtime`), so scoping the guard
+    to `runtime`'s own `os` name alone left a real path to `os.kill` on a
+    real pid: `_stop_local_proxy_for_unwrap` -> `_check_proxy` (a real socket
+    connect) -> `query_proxy_config` (a real GET to /health) -> the live
+    proxy's own self-reported pid -> `_kill_proxy_by_pid` ->
+    `os.kill(pid, SIGTERM/SIGKILL)` (wrap.py:3647/3663). That reached the
+    developer's live proxy on port 8787 eight times in one suite run. Signal
+    0 (a pure liveness probe, never destructive) is exempted so
+    `headroom._subprocess.pid_alive`'s fallback keeps working against pids a
+    test did not spawn."""
     import os
 
-    assert os.kill is _REAL_OS_KILL
+    assert os.kill is not _REAL_OS_KILL
 
 
 def test_guard_proxy_still_delegates_unrelated_os_attributes() -> None:

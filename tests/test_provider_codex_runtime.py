@@ -228,7 +228,8 @@ def _send_probe(base_url: str, *, model: str, content: str) -> dict[str, object]
         timeout=10.0,
     )
     response.raise_for_status()
-    return response.json()
+    payload: dict[str, object] = response.json()
+    return payload
 
 
 def _assert_delivery(
@@ -249,14 +250,33 @@ def _assert_delivery(
     else:
         raise AssertionError(f"Headroom never recorded model {model!r} in /stats")
 
-    assert payload["choices"][0]["message"]["content"] == "mock completion from upstream"
-    assert any(
-        item["path"] == "/v1/chat/completions"
-        and isinstance(item.get("body"), dict)
-        and item["body"].get("model") == model
-        and item["body"].get("messages") == [{"role": "user", "content": content}]
-        for item in stack.upstream.requests
-    )
+    choices = payload["choices"]
+    assert isinstance(choices, list)
+    first_choice = choices[0]
+    assert isinstance(first_choice, dict)
+    message = first_choice.get("message")
+    assert isinstance(message, dict)
+    assert message.get("content") == "mock completion from upstream"
+
+    # Headroom's proxy prepends a byte-stable output-verbosity steering system
+    # message to every OpenAI chat/completions request by default (see
+    # `headroom.proxy.output_shaper`, `verbosity_level` defaults to 3), so the
+    # original probe message survives as the *last* message rather than the
+    # *only* one. Assert on that instead of exact-list equality so this test
+    # tracks "did our message get through" without also pinning the proxy's
+    # default steering behavior.
+    def _matches(item: dict[str, object]) -> bool:
+        if item["path"] != "/v1/chat/completions":
+            return False
+        body = item.get("body")
+        if not isinstance(body, dict) or body.get("model") != model:
+            return False
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return False
+        return bool(messages[-1] == {"role": "user", "content": content})
+
+    assert any(_matches(item) for item in stack.upstream.requests)
 
 
 def _codex_base_url_from_config(path: Path) -> str:

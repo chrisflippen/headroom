@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -16,7 +17,7 @@ def test_validate_profile_name_accepts_and_rejects_values() -> None:
             install_paths.validate_profile_name(value)
 
 
-def test_profile_and_artifact_paths(monkeypatch, tmp_path: Path) -> None:
+def test_profile_and_artifact_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("headroom.install.paths._paths.deploy_root", lambda: tmp_path / "deploy")
 
     assert install_paths.deploy_root() == tmp_path / "deploy"
@@ -45,7 +46,7 @@ def test_profile_and_artifact_paths(monkeypatch, tmp_path: Path) -> None:
     )
 
 
-def test_env_target_and_config_paths(monkeypatch, tmp_path: Path) -> None:
+def test_env_target_and_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr("headroom.install.paths.sys.platform", "linux")
 
@@ -68,4 +69,34 @@ def test_env_target_and_config_paths(monkeypatch, tmp_path: Path) -> None:
     assert install_paths.openclaw_config_path() == tmp_path / ".openclaw" / "openclaw.json"
     assert (
         install_paths.opencode_config_path() == tmp_path / ".config" / "opencode" / "opencode.json"
+    )
+
+
+# Regression test for the 2026-09-05 proxy-restart incident:
+# `headroom.install.runtime`'s stop path reads a pid to `os.kill` via
+# `pid_path(profile)`, which resolves through `deploy_root()` ->
+# `headroom.paths.workspace_dir()`. If that chain ever again picked up an
+# import-time-cached `Path.home()` (rather than resolving `HOME`/
+# `HEADROOM_WORKSPACE_DIR` lazily at call time, as it does today), a
+# stop/restart test would land on the developer's real
+# `~/.headroom/deploy/default/runner.pid` and SIGTERM their real, live
+# runner -- the same class of bug that let `headroom/cli/wrap.py` reach the
+# real live proxy on port 8787 (see
+# `tests/test_real_proxy_signal_network_guard.py`). This test does *not*
+# monkeypatch `deploy_root` itself (unlike `test_profile_and_artifact_paths`
+# above) specifically so it proves the *real* resolution chain, driven only
+# by `tests/conftest.py`'s `_isolate_headroom_home` autouse fixture, lands
+# under the fake, per-test workspace rather than the real one.
+def test_pid_path_resolves_under_the_isolated_workspace_during_tests() -> None:
+    workspace_dir = os.environ.get("HEADROOM_WORKSPACE_DIR")
+    assert workspace_dir, (
+        "expected tests/conftest.py's _isolate_headroom_home autouse fixture "
+        "to have set HEADROOM_WORKSPACE_DIR for every test"
+    )
+
+    resolved = install_paths.pid_path("default")
+
+    assert resolved == Path(workspace_dir) / "deploy" / "default" / "runner.pid"
+    assert not str(resolved).startswith(str(Path.home() / ".headroom")), (
+        "pid_path('default') must never resolve under the real ~/.headroom during tests"
     )

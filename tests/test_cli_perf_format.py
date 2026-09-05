@@ -7,6 +7,7 @@ import io
 import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -83,7 +84,7 @@ def _sample_report() -> PerfReport:
 # ---------------------------------------------------------------------------
 
 
-def test_build_perf_summary_totals_and_pct():
+def test_build_perf_summary_totals_and_pct() -> None:
     summary = build_perf_summary(_sample_report())
 
     assert summary["total_requests"] == 2
@@ -99,7 +100,7 @@ def test_build_perf_summary_totals_and_pct():
     assert summary["window_hours"] == 24.0
 
 
-def test_build_perf_summary_by_model_and_transform():
+def test_build_perf_summary_by_model_and_transform() -> None:
     summary = build_perf_summary(_sample_report())
 
     models = {m["model"]: m for m in summary["by_model"]}
@@ -113,7 +114,7 @@ def test_build_perf_summary_by_model_and_transform():
     assert summary["by_transform"][0]["uses"] == 1
 
 
-def test_build_perf_summary_empty_report_no_zero_division():
+def test_build_perf_summary_empty_report_no_zero_division() -> None:
     summary = build_perf_summary(PerfReport(requested_hours=168.0))
     assert summary["total_requests"] == 0
     assert summary["savings_pct"] == 0.0
@@ -122,7 +123,7 @@ def test_build_perf_summary_empty_report_no_zero_division():
     assert summary["overhead"]["optimization_ms"]["count"] == 0
 
 
-def test_build_overhead_summary_attributes_slow_stages():
+def test_build_overhead_summary_attributes_slow_stages() -> None:
     report = PerfReport(
         perf_records=[
             PerfRecord(
@@ -164,7 +165,7 @@ def test_build_overhead_summary_attributes_slow_stages():
     assert overhead["top_slow_requests"][0]["slowest_stage"] == "kompress"
 
 
-def test_perf_records_as_dicts_roundtrips_fields():
+def test_perf_records_as_dicts_roundtrips_fields() -> None:
     dicts = perf_records_as_dicts(_sample_report())
     assert len(dicts) == 2
     assert dicts[0]["request_id"] == "hr_1"
@@ -178,11 +179,11 @@ def test_perf_records_as_dicts_roundtrips_fields():
 # ---------------------------------------------------------------------------
 
 
-def _patch_report(monkeypatch, report: PerfReport) -> None:
+def _patch_report(monkeypatch: pytest.MonkeyPatch, report: PerfReport) -> None:
     monkeypatch.setattr(analyzer, "parse_log_files", lambda last_n_hours=168.0: report)
 
 
-def test_perf_json_format(runner, monkeypatch):
+def test_perf_json_format(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_report(monkeypatch, _sample_report())
     result = runner.invoke(main, ["perf", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -193,7 +194,7 @@ def test_perf_json_format(runner, monkeypatch):
     assert data["overhead"]["optimization_ms"]["p95_ms"] == 11.8
 
 
-def test_perf_json_raw_is_array(runner, monkeypatch):
+def test_perf_json_raw_is_array(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_report(monkeypatch, _sample_report())
     result = runner.invoke(main, ["perf", "--format", "json", "--raw"])
     assert result.exit_code == 0, result.output
@@ -203,7 +204,9 @@ def test_perf_json_raw_is_array(runner, monkeypatch):
     assert data[0]["request_id"] == "hr_1"
 
 
-def test_perf_json_raw_preserves_client_field(runner, monkeypatch):
+def test_perf_json_raw_preserves_client_field(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
     report = _sample_report()
     report.perf_records[0].client = "codex"
     _patch_report(monkeypatch, report)
@@ -215,7 +218,15 @@ def test_perf_json_raw_preserves_client_field(runner, monkeypatch):
     assert data[0]["client"] == "codex"
 
 
-def test_parse_perf_line_preserves_client_field(monkeypatch, tmp_path):
+def test_parse_perf_line_preserves_client_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `parse_log_files` resolves the log directory dynamically from
+    # `HEADROOM_WORKSPACE_DIR` when that env var is set (see the comment on
+    # `_report_for` below) -- the isolation fixture in conftest.py sets it
+    # for every test, so it must be cleared here to exercise the static
+    # `analyzer.LOG_DIR` seam this test patches.
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     (log_dir / "proxy.log").write_text(
@@ -241,19 +252,22 @@ def _perf_line(ts: datetime, client: str) -> str:
     )
 
 
-def _write_log(path, text: str, mtime: datetime) -> None:
+def _write_log(path: Path, text: str, mtime: datetime) -> None:
     path.write_text(text)
     stamp = mtime.timestamp()
     os.utime(path, (stamp, stamp))
 
 
-def test_windowed_parse_skips_rotated_logs_older_than_the_cutoff(monkeypatch, tmp_path):
+def test_windowed_parse_skips_rotated_logs_older_than_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A windowed query must cost O(window), not O(total log history).
 
     `/stats` recomputes throughput over the last hour on a 10s cache TTL, so
     reading every rotated log each time made the endpoint slower the longer
     the proxy had been running.
     """
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     now = datetime.now()
@@ -276,8 +290,11 @@ def test_windowed_parse_skips_rotated_logs_older_than_the_cutoff(monkeypatch, tm
     assert report.log_files_skipped == 1
 
 
-def test_unwindowed_parse_still_reads_every_rotated_log(monkeypatch, tmp_path):
+def test_unwindowed_parse_still_reads_every_rotated_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """`--hours 0` means "all data" and must not prune anything."""
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     now = datetime.now()
@@ -296,7 +313,7 @@ def test_unwindowed_parse_still_reads_every_rotated_log(monkeypatch, tmp_path):
     assert report.log_files_read == 2
 
 
-def test_perf_csv_by_model(runner, monkeypatch):
+def test_perf_csv_by_model(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_report(monkeypatch, _sample_report())
     result = runner.invoke(main, ["perf", "--format", "csv"])
     assert result.exit_code == 0, result.output
@@ -306,7 +323,7 @@ def test_perf_csv_by_model(runner, monkeypatch):
     assert sonnet["tokens_saved"] == "600"
 
 
-def test_perf_csv_raw_per_record(runner, monkeypatch):
+def test_perf_csv_raw_per_record(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     report = _sample_report()
     report.perf_records[0].client = "codex"
     _patch_report(monkeypatch, report)
@@ -320,7 +337,7 @@ def test_perf_csv_raw_per_record(runner, monkeypatch):
     assert rows[0]["transforms"] == "content_router"
 
 
-def test_perf_text_default_unchanged(runner, monkeypatch):
+def test_perf_text_default_unchanged(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_report(monkeypatch, _sample_report())
     result = runner.invoke(main, ["perf"])
     assert result.exit_code == 0, result.output
@@ -328,15 +345,16 @@ def test_perf_text_default_unchanged(runner, monkeypatch):
     assert "p50/p95/p99" in result.output
 
 
-def test_perf_rejects_unknown_format(runner, monkeypatch):
+def test_perf_rejects_unknown_format(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_report(monkeypatch, _sample_report())
     result = runner.invoke(main, ["perf", "--format", "xml"])
     assert result.exit_code != 0
 
 
 def test_parse_perf_line_preserves_blank_client_field(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
     monkeypatch.setattr(analyzer, "LOG_DIR", logs_dir)
@@ -353,7 +371,10 @@ def test_parse_perf_line_preserves_blank_client_field(
     assert report.perf_records[0].client == ""
 
 
-def test_throughput_parsing_and_calculations(monkeypatch, tmp_path):
+def test_throughput_parsing_and_calculations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
     monkeypatch.setattr(analyzer, "LOG_DIR", logs_dir)
@@ -397,7 +418,7 @@ def test_throughput_parsing_and_calculations(monkeypatch, tmp_path):
     assert rolling["compression_p50"] == 10000.0
 
 
-def test_throughput_empty_and_percentiles():
+def test_throughput_empty_and_percentiles() -> None:
     from headroom.perf.analyzer import (
         PerfReport,
         _calculate_throughput_stats,
@@ -442,15 +463,18 @@ def _savings_perf_line(encoded: str, req: int = 1) -> str:
     )
 
 
-def _report_for(lines: list[str], tmp_path, monkeypatch) -> str:
+def _report_for(lines: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """Render a report over `lines`, using this file's established LOG_DIR seam.
 
     Deliberately NOT `HEADROOM_WORKSPACE_DIR`: that env var flips which branch
     resolves the log directory, which changes behaviour for the rotated-log
-    tests above.
+    tests above. The isolation fixture in conftest.py sets it for every test
+    though, so it must be explicitly cleared here to fall back to the static
+    `analyzer.LOG_DIR` seam this helper patches.
     """
     from headroom.perf import analyzer
 
+    monkeypatch.delenv("HEADROOM_WORKSPACE_DIR", raising=False)
     logs = tmp_path / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     (logs / "proxy.log").write_text("\n".join(lines) + "\n")
@@ -458,7 +482,9 @@ def _report_for(lines: list[str], tmp_path, monkeypatch) -> str:
     return analyzer.format_report(analyzer.parse_log_files(last_n_hours=0))
 
 
-def test_dollar_only_source_is_reported_with_zero_tokens(tmp_path, monkeypatch):
+def test_dollar_only_source_is_reported_with_zero_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A router saves DOLLARS and exactly zero tokens; both must be legible.
 
     routemegood sends the same tokens to a cheaper model, so every token-savings
@@ -482,7 +508,9 @@ def test_dollar_only_source_is_reported_with_zero_tokens(tmp_path, monkeypatch):
     assert "$0.13" in out
 
 
-def test_token_source_and_dollar_source_coexist(tmp_path, monkeypatch):
+def test_token_source_and_dollar_source_coexist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from headroom.proxy.savings_attribution import encode
 
     out = _report_for(
@@ -503,6 +531,8 @@ def test_token_source_and_dollar_source_coexist(tmp_path, monkeypatch):
     assert "2,233 tokens" in out
 
 
-def test_no_section_when_nothing_attributed(tmp_path, monkeypatch):
+def test_no_section_when_nothing_attributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     out = _report_for([_savings_perf_line("none")], tmp_path, monkeypatch)
     assert "Savings by Source" not in out

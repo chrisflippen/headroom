@@ -89,6 +89,137 @@ def _isolate_headroom_home(
     monkeypatch.setenv("HEADROOM_CONFIG_DIR", str(fake_config))
 
 
+_REAL_SERVICE_MANAGER_COMMANDS = frozenset({"launchctl", "systemctl", "sc.exe"})
+
+
+def _real_service_manager_command_name(command: object) -> str | None:
+    """Return the lowercase basename of *command*'s argv[0], if any.
+
+    ``command`` is whatever was handed to ``subprocess.run`` -- either an
+    argv list/tuple (the common case) or, for the Windows ``sc.exe create``
+    call, a single pre-quoted string (see `headroom/install/supervisors.py`).
+    """
+    head: object
+    if isinstance(command, (list, tuple)) and command:
+        head = command[0]
+    elif isinstance(command, str) and command.strip():
+        head = command.split()[0]
+    else:
+        return None
+    return str(head).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _is_real_service_manager_command(command: object) -> bool:
+    return _real_service_manager_command_name(command) in _REAL_SERVICE_MANAGER_COMMANDS
+
+
+def _raise_real_service_manager_blocked() -> None:
+    raise AssertionError(
+        "test tried to touch the real service manager. A production headroom "
+        "proxy was taken offline for 8 hours (2026-09) by tests that let a "
+        "`launchctl bootout gui/501/com.headroom.default` reach the real OS "
+        "instead of a mock. File-path isolation (see `_isolate_headroom_home` "
+        "above) does not stop this -- it only isolates *file* paths, not "
+        "*process/service* control. If a test genuinely needs the real "
+        "service manager or to send a real process signal, opt in explicitly "
+        "with `@pytest.mark.allow_real_service_manager` or by requesting the "
+        "`allow_real_service_manager` fixture."
+    )
+
+
+class _RealOsKillGuardProxy:
+    """Stands in for the ``os`` module inside a single module's namespace.
+
+    Delegates every attribute except ``kill`` to the real ``os`` module, so
+    existing tests that do e.g.
+    ``monkeypatch.setattr("headroom.install.runtime.os.getuid", ...)`` keep
+    working unchanged, while ``headroom.install.runtime.os.kill(...)`` (the
+    call that sends `SIGTERM` to stop a running proxy) is guarded. Scoped to
+    one module's ``os`` name rather than the real ``os`` module itself, since
+    `os.kill` is also used, legitimately, by unrelated code
+    (`headroom/cli/wrap.py`) and unrelated tests that clean up their own
+    spawned child processes -- patching the real module would break those.
+    """
+
+    def __init__(self, real_os_module: Any) -> None:
+        object.__setattr__(self, "_real_os_module", real_os_module)
+
+    def kill(self, pid: int, sig: int) -> None:
+        _raise_real_service_manager_blocked()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_real_os_module"), name)
+
+
+# 2026-09: two install tests called the REAL `launchctl bootout
+# gui/501/com.headroom.default` and took the live proxy down for 8 hours.
+# `_isolate_headroom_home` above only redirects *file* paths -- it cannot
+# stop a test from shelling out to the real launchd/systemd/Windows SCM, or
+# from sending a real SIGTERM to a real pid. Guard those entry points too.
+#
+# `headroom.install.supervisors` and `headroom.install.runtime` both reach
+# launchctl/systemctl/sc.exe through the *same* underlying `subprocess.run`
+# (either directly, or via `headroom._subprocess.run`'s `subprocess.run(...)`
+# call) -- so patching the real `subprocess.run` here, content-filtered to
+# only the three service-manager binaries, silently protects every call
+# path without needing to know which of the two ways a given call site
+# reaches it. Every existing test in tests/test_install/test_supervisors.py
+# and tests/test_install/test_runtime.py already stubs out
+# ``subprocess.run``/``os.kill`` itself before exercising these code paths;
+# that stub is installed *after* this fixture runs and simply replaces the
+# guard for that one test (same shared `monkeypatch` instance, last write
+# wins) -- this guard only ever fires for a call that nobody has mocked.
+#
+# `os.kill` cannot be guarded the same way: it is real, unrelated,
+# legitimate cleanup code elsewhere (`headroom/cli/wrap.py`, several e2e/wrap
+# tests) that kills real child processes those tests spawned themselves.
+# Patching the real `os.kill` globally would break all of that, so it is
+# guarded only inside `headroom.install.runtime`'s own namespace, where its
+# one call site (the `SIGTERM` in `stop_runtime`) actually lives.
+@pytest.fixture(autouse=True)
+def _guard_real_service_manager(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if "allow_real_service_manager" in request.fixturenames:
+        return
+    if request.node.get_closest_marker("allow_real_service_manager") is not None:
+        return
+
+    import subprocess as real_subprocess
+
+    try:
+        from headroom.install import runtime as _install_runtime
+    except ModuleNotFoundError:
+        # Same reasoning as `_skip_proxy_dependency_gate_unless_exercised`:
+        # native-wrapper jobs install only pytest, without Headroom's
+        # runtime dependencies, and never exercise this code path.
+        return
+
+    real_subprocess_run = real_subprocess.run
+
+    def _guarded_subprocess_run(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if _is_real_service_manager_command(command):
+            _raise_real_service_manager_blocked()
+        return real_subprocess_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(real_subprocess, "run", _guarded_subprocess_run)
+    monkeypatch.setattr(_install_runtime, "os", _RealOsKillGuardProxy(_install_runtime.os))
+
+
+@pytest.fixture
+def allow_real_service_manager() -> None:
+    """Opt-in escape hatch for a test that must legitimately reach the real
+    service manager or send a real process signal.
+
+    Requesting this fixture (or marking the test
+    ``@pytest.mark.allow_real_service_manager``) disables
+    `_guard_real_service_manager` above for that one test. This should be
+    exceedingly rare -- it is exactly the gap that took the production proxy
+    down for 8 hours -- so any use of it should be reviewed carefully.
+    """
+    return None
+
+
 # The scrub above deletes every HEADROOM_* var — which includes HEADROOM_BEACON,
 # and the beacon defaults to ON. So scrubbing for hermeticity is precisely what
 # switches it on, and with HEADROOM_TELEMETRY_ENDPOINT scrubbed too it falls back

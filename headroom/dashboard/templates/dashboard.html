@@ -1977,13 +1977,19 @@
         <div class="flex items-center justify-between px-4 py-3 border-b border-border">
             <div class="flex items-center gap-3">
                 <span class="text-sm font-medium text-gray-200">Message Transformations</span>
-                <span class="text-xs text-gray-500 font-mono" x-text="transformations.length + ' msgs'"></span>
+                <span class="text-xs text-gray-500 font-mono" x-text="filteredTransformations.length + ' msgs'"></span>
             </div>
-            <button @click="feedOpen = false" class="text-gray-500 hover:text-gray-200 transition-colors p-1">
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854z"/>
-                </svg>
-            </button>
+            <div class="flex items-center gap-3">
+                <label class="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors cursor-pointer select-none">
+                    <input type="checkbox" x-model="feedHideCountTokens" @change="renderTransformations()" class="accent-accent">
+                    Hide count_tokens
+                </label>
+                <button @click="feedOpen = false" class="text-gray-500 hover:text-gray-200 transition-colors p-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854z"/>
+                    </svg>
+                </button>
+            </div>
         </div>
 
         <!-- New messages indicator -->
@@ -1993,7 +1999,7 @@
             <span x-text="feedNewCount"></span> new message<span x-show="feedNewCount > 1">s</span>
         </div>
 
-        <!-- Drawer Content (virtual scroll container) -->
+        <!-- Drawer Content: cards render in normal flow (variable height) -->
         <div class="flex-1 overflow-y-auto" id="feed-container"
              @scroll="handleFeedScroll()">
             <div id="feed-virtual-list" class="relative"></div>
@@ -2090,6 +2096,204 @@
             }
         }
 
+        // --- Transformations feed rendering helpers ---
+        // Standalone functions (not Alpine methods) so each piece can be
+        // read and reasoned about in isolation. renderFeedCard composes
+        // them into one card's markup.
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str == null ? '' : str;
+            return div.innerHTML;
+        }
+
+        function formatFeedNumber(n) {
+            n = n || 0;
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+            return n.toString();
+        }
+
+        // Renders one Anthropic/OpenAI-style content block as readable text.
+        function renderBlock(block) {
+            if (block == null) return '';
+            if (typeof block === 'string') return block;
+            const type = block.type;
+            if (type === 'text') {
+                return block.text || '';
+            }
+            if (type === 'tool_use') {
+                const name = block.name || 'tool';
+                const input = JSON.stringify(block.input || {});
+                const preview = input.length > 120 ? input.substring(0, 120) + '…' : input;
+                return `▶ ${name}(${preview})`;
+            }
+            if (type === 'tool_result') {
+                const inner = renderBlocks(block.content);
+                const preview = inner.length > 300 ? inner.substring(0, 300) + '…' : inner;
+                return `◀ result (${inner.length} chars)\n${preview}`;
+            }
+            if (type === 'image') {
+                return '[image]';
+            }
+            return `[${type || 'unknown'}]`;
+        }
+
+        // Flattens a message's `content` (a string, or an array of content
+        // blocks) into readable plain text. This is what fixes the
+        // `[object Object],[object Object]` bug: block arrays are rendered
+        // block-by-block instead of string-concatenated.
+        function renderBlocks(content) {
+            if (content == null) return '';
+            if (typeof content === 'string') return content;
+            if (!Array.isArray(content)) return String(content);
+            return content.map(renderBlock).join('\n');
+        }
+
+        function capPane(text, limit = 1200) {
+            text = text || '';
+            if (text.length <= limit) return text;
+            return text.substring(0, limit) + '…[truncated]';
+        }
+
+        // Compares `before` and `after` message arrays by index and returns
+        // one row per message with a status of 'unchanged', 'changed',
+        // 'added', or 'removed'. Arrays of different lengths report the
+        // extra messages on either side as added/removed rather than
+        // comparing them against nothing.
+        function diffMessages(before, after) {
+            before = before || [];
+            after = after || [];
+            const rows = [];
+            const maxLen = Math.max(before.length, after.length);
+            for (let i = 0; i < maxLen; i++) {
+                const b = before[i];
+                const a = after[i];
+                if (b === undefined) {
+                    rows.push({ status: 'added', before: null, after: a });
+                    continue;
+                }
+                if (a === undefined) {
+                    rows.push({ status: 'removed', before: b, after: null });
+                    continue;
+                }
+                const changed = b.role !== a.role || renderBlocks(b.content) !== renderBlocks(a.content);
+                rows.push({ status: changed ? 'changed' : 'unchanged', before: b, after: a });
+            }
+            return rows;
+        }
+
+        // Renders the body of one feed card: a diff of request_messages vs
+        // compressed_messages, with unchanged runs collapsed to a single
+        // muted summary line.
+        function renderFeedBody(t, logFullMessages) {
+            if (!logFullMessages) {
+                return '<div class="text-xs text-gray-600 italic px-1 py-2">content logging off (HEADROOM_LOG_MESSAGES=true)</div>';
+            }
+
+            const rows = diffMessages(t.request_messages, t.compressed_messages);
+            if (rows.length === 0 || rows.every(r => r.status === 'unchanged')) {
+                return '<div class="text-xs text-gray-600 italic px-1 py-2">no change</div>';
+            }
+
+            let html = '';
+            let unchangedRun = 0;
+            const flushUnchanged = () => {
+                if (unchangedRun > 0) {
+                    html += `<div class="text-[11px] text-gray-600 italic px-1 py-1">${unchangedRun} message${unchangedRun > 1 ? 's' : ''} unchanged (cached prefix)</div>`;
+                    unchangedRun = 0;
+                }
+            };
+
+            for (const row of rows) {
+                if (row.status === 'unchanged') {
+                    unchangedRun++;
+                    continue;
+                }
+                flushUnchanged();
+
+                if (row.status === 'added') {
+                    html += `<div class="text-[11px] text-emerald-400 px-1 py-1">+ added: ${escapeHtml((row.after && row.after.role) || 'message')}</div>`;
+                    continue;
+                }
+                if (row.status === 'removed') {
+                    html += `<div class="text-[11px] text-red-400 px-1 py-1">− removed: ${escapeHtml((row.before && row.before.role) || 'message')}</div>`;
+                    continue;
+                }
+
+                const beforeText = capPane(renderBlocks(row.before.content));
+                const afterText = capPane(renderBlocks(row.after.content));
+                html += `
+                    <div class="grid grid-cols-2 gap-2 py-1.5">
+                        <div class="rounded border border-red-900/30 overflow-hidden flex flex-col">
+                            <div class="diff-before-header px-2 py-1 border-b border-red-900/30 shrink-0">
+                                <span class="text-[10px] text-red-400 uppercase tracking-wide font-semibold">Before · ${escapeHtml(row.before.role || '')}</span>
+                            </div>
+                            <div class="diff-before p-2 font-mono text-[11px] text-gray-300 whitespace-pre-wrap break-words">${escapeHtml(beforeText)}</div>
+                        </div>
+                        <div class="rounded border border-emerald-900/30 overflow-hidden flex flex-col">
+                            <div class="diff-after-header px-2 py-1 border-b border-emerald-900/30 shrink-0">
+                                <span class="text-[10px] text-emerald-400 uppercase tracking-wide font-semibold">After · ${escapeHtml(row.after.role || '')}</span>
+                            </div>
+                            <div class="diff-after p-2 font-mono text-[11px] text-gray-300 whitespace-pre-wrap break-words">${escapeHtml(afterText)}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            flushUnchanged();
+            return html;
+        }
+
+        // Assembles one feed card: header line (model, before/after tokens,
+        // savings, cache hit/write, time), wrapping transform chips, and
+        // the diff body from renderFeedBody. Cards are variable height —
+        // the caller renders them in normal document flow, no virtual
+        // scroll windowing.
+        function renderFeedCard(t, idx, logFullMessages) {
+            const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString() : '--:--:--';
+            const model = (t.model || 'unknown').replace(/^(anthropic:|openai:|passthrough:)/, '').substring(0, 30);
+            const before = t.input_tokens_original ?? 0;
+            const after = t.input_tokens_optimized ?? 0;
+            const tokensSaved = t.tokens_saved || 0;
+            const savingsPct = (t.savings_percent || 0).toFixed(0);
+            const cacheRead = t.cache_read_tokens || 0;
+            const cacheWrite = t.cache_write_tokens || 0;
+            const writeExceedsRead = cacheWrite > 0 && cacheWrite > cacheRead;
+
+            let cacheHtml = '';
+            if (cacheRead > 0 || cacheWrite > 0) {
+                const parts = [];
+                if (cacheRead > 0) parts.push(`<span class="text-emerald-400">hit ${formatFeedNumber(cacheRead)}</span>`);
+                if (cacheWrite > 0) parts.push(`<span class="${writeExceedsRead ? 'text-amber-400' : 'text-gray-400'}">write ${formatFeedNumber(cacheWrite)}</span>`);
+                cacheHtml = `
+                    <span class="text-xs text-gray-600 shrink-0">·</span>
+                    <span class="text-xs shrink-0 text-gray-500">cache ${parts.join(' / ')}</span>
+                `;
+            }
+
+            const chips = (t.transforms_applied || []);
+            const chipsHtml = chips.length > 0
+                ? `<div class="flex flex-wrap gap-1 mt-1.5">${chips.map(tr => `<span class="text-[9px] px-1.5 py-0.5 bg-border rounded font-mono text-gray-500">${escapeHtml(tr)}</span>`).join('')}</div>`
+                : '';
+
+            return `
+                <div class="transformation-card border-b border-border p-3" data-idx="${idx}">
+                    <div class="flex items-center flex-wrap gap-x-2 gap-y-1 mb-1">
+                        <span class="text-xs font-mono text-gray-400 truncate">${escapeHtml(model)}</span>
+                        <span class="text-xs text-gray-600 shrink-0">·</span>
+                        <span class="text-xs text-gray-400 shrink-0">${formatFeedNumber(before)} → ${formatFeedNumber(after)} tok</span>
+                        <span class="text-xs text-gray-600 shrink-0">·</span>
+                        <span class="text-xs text-emerald-400 shrink-0">saved ${formatFeedNumber(tokensSaved)} (${savingsPct}%)</span>
+                        ${cacheHtml}
+                        ${(t.tool_schema_saved_tokens || 0) > 0 ? `<span class="text-xs text-cyan-400 shrink-0" title="Tool-definition tokens deferred out of context">+${t.tool_schema_saved_tokens} tool-schema</span>` : ''}
+                        <span class="text-xs text-gray-600 shrink-0 ml-auto">${time}</span>
+                    </div>
+                    ${chipsHtml}
+                    <div class="mt-1.5">${renderFeedBody(t, logFullMessages)}</div>
+                </div>
+            `;
+        }
+
         function dashboard() {
             return {
                 stats: {},
@@ -2127,10 +2331,13 @@
                 transformations: [],
                 feedScrolled_: false,
                 feedNewCount: 0,
-                feedScrollY: 0,
-                feedItemHeight: 160,
-                feedBuffer: 5,
+                feedHideCountTokens: true,
                 log_full_messages: false,
+
+                get filteredTransformations() {
+                    if (!this.feedHideCountTokens) return this.transformations;
+                    return this.transformations.filter(t => !t.passthrough);
+                },
 
                 async init() {
                     this.checkpointGranularity = this.loadCheckpointGranularity();
@@ -2243,16 +2450,16 @@
 
                 async fetchTransformations() {
                     try {
-                        const prevLen = this.transformations.length;
-                        const response = await fetch('/transformations/feed?limit=50');
+                        const prevLen = this.filteredTransformations.length;
+                        const response = await fetch('/transformations/feed?limit=100');
                         if (response.ok) {
                             const data = await response.json();
-                            const newLen = (data.transformations || []).length;
+                            this.transformations = data.transformations || [];
+                            this.log_full_messages = data.log_full_messages ?? this.log_full_messages;
+                            const newLen = this.filteredTransformations.length;
                             if (this.feedScrolled_ && newLen > prevLen) {
                                 this.feedNewCount = newLen - prevLen;
                             }
-                            this.transformations = data.transformations || [];
-                            this.log_full_messages = data.log_full_messages ?? this.log_full_messages;
                             this.lastFeedFetchMs = Date.now();
                             this.renderTransformations();
                         }
@@ -2267,7 +2474,6 @@
                         container.scrollTop = 0;
                         this.feedScrolled_ = false;
                         this.feedNewCount = 0;
-                        this.renderTransformations();
                     }
                 },
 
@@ -2275,96 +2481,20 @@
                     const container = document.getElementById('feed-container');
                     if (!container) return;
 
-                    this.feedScrollY = container.scrollTop;
                     this.feedScrolled_ = container.scrollTop > 50;
-                    this.renderTransformations();
                 },
 
+                // Renders every fetched card (capped at 100, already enforced
+                // server-side) in normal document flow — no virtual scroll
+                // windowing, since cards are variable height.
                 renderTransformations() {
                     const container = document.getElementById('feed-virtual-list');
                     if (!container) return;
 
-                    const scrollTop = this.feedScrollY;
-                    const viewportHeight = (document.getElementById('feed-container')?.clientHeight || 600);
-
-                    const totalHeight = this.transformations.length * this.feedItemHeight;
-                    container.style.height = totalHeight + 'px';
-
-                    // Calculate visible range with buffer
-                    const startIdx = Math.max(0, Math.floor(scrollTop / this.feedItemHeight) - this.feedBuffer);
-                    const endIdx = Math.min(
-                        this.transformations.length,
-                        Math.ceil((scrollTop + viewportHeight) / this.feedItemHeight) + this.feedBuffer
-                    );
-
-                    const visible = this.transformations.slice(startIdx, endIdx);
-                    const offsetTop = startIdx * this.feedItemHeight;
-
-                    let html = `<div style="position: absolute; top: ${offsetTop}px; width: 100%;">`;
-                    html += visible.map((t, i) => this.renderTransformationCard(t, startIdx + i)).join('');
-                    html += '</div>';
-
-                    container.innerHTML = html;
-                },
-
-                renderTransformationCard(t, idx) {
-                    const msgs = (t.request_messages || []).map(m => m.content || '').join('');
-                    const response = t.response_content || '';
-                    const hasMessages = msgs.length > 0 || response.length > 0;
-                    const before = msgs.substring(0, 2000) + (msgs.length > 2000 ? '\n\n[truncated]' : '');
-                    const after = response.substring(0, 2000) + (response.length > 2000 ? '\n\n[truncated]' : '');
-
-                    const time = t.timestamp ? new Date(t.timestamp).toLocaleTimeString() : '--:--:--';
-                    const model = (t.model || 'unknown').replace(/^(anthropic\.|openai\.)/, '').substring(0, 25);
-                    const tokensSaved = t.tokens_saved || 0;
-                    const savingsPct = ((t.savings_percent || 0)).toFixed(0);
-
-                    const emptyState = '<span class="text-gray-600 italic">Enable HEADROOM_LOG_MESSAGES=true to see content</span>';
-                    const beforeContent = hasMessages ? this.escapeHtml(before) : emptyState;
-                    const afterContent = hasMessages ? this.escapeHtml(after) : emptyState;
-
-                    return `
-                        <div class="transformation-card border-b border-border p-3" data-idx="${idx}" style="height: ${this.feedItemHeight}px; box-sizing: border-box;">
-                            <div class="flex items-center justify-between mb-2">
-                                <div class="flex items-center gap-2 min-w-0">
-                                    <span class="text-xs font-mono text-gray-400 truncate">${this.escapeHtml(model)}</span>
-                                    <span class="text-xs text-gray-600 shrink-0">·</span>
-                                    <span class="text-xs text-emerald-400 shrink-0">${tokensSaved} tok</span>
-                                    <span class="text-xs text-gray-600 shrink-0">(${savingsPct}%)</span>
-                                    ${(t.tool_schema_saved_tokens || 0) > 0 ? `<span class="text-xs text-cyan-400 shrink-0" title="Tool-definition tokens deferred out of context">+${t.tool_schema_saved_tokens} tool-schema</span>` : ''}
-                                </div>
-                                <span class="text-xs text-gray-600 shrink-0">${time}</span>
-                            </div>
-                            <div class="grid grid-cols-2 gap-2" style="height: 115px;">
-                                <div class="rounded border border-red-900/30 overflow-hidden flex flex-col">
-                                    <div class="diff-before-header px-2 py-1 border-b border-red-900/30 shrink-0">
-                                        <span class="text-[10px] text-red-400 uppercase tracking-wide font-semibold">Before</span>
-                                    </div>
-                                    <div class="diff-before p-2 font-mono text-[11px] text-gray-300 overflow-auto flex-1"
-                                         >${beforeContent}</div>
-                                </div>
-                                <div class="rounded border border-emerald-900/30 overflow-hidden flex flex-col">
-                                    <div class="diff-after-header px-2 py-1 border-b border-emerald-900/30 shrink-0">
-                                        <span class="text-[10px] text-emerald-400 uppercase tracking-wide font-semibold">After</span>
-                                    </div>
-                                    <div class="diff-after p-2 font-mono text-[11px] text-gray-300 overflow-auto flex-1"
-                                         >${afterContent}</div>
-                                </div>
-                            </div>
-                            ${(t.transforms_applied || []).length > 0 ? `
-                                <div class="flex flex-wrap gap-1 mt-1.5">
-                                    ${t.transforms_applied.slice(0, 4).map(tr => `<span class="text-[9px] px-1.5 py-0.5 bg-border rounded font-mono text-gray-500">${this.escapeHtml(tr)}</span>`).join('')}
-                                    ${t.transforms_applied.length > 4 ? `<span class="text-[9px] text-gray-600">+${t.transforms_applied.length - 4}</span>` : ''}
-                                </div>
-                            ` : ''}
-                        </div>
-                    `;
-                },
-
-                escapeHtml(str) {
-                    const div = document.createElement('div');
-                    div.textContent = str;
-                    return div.innerHTML;
+                    const items = this.filteredTransformations.slice(0, 100);
+                    container.innerHTML = items
+                        .map((t, i) => renderFeedCard(t, i, this.log_full_messages))
+                        .join('');
                 },
 
                 // --- Formatting ---

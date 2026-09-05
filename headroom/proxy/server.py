@@ -142,6 +142,7 @@ from headroom.proxy.helpers import (
     _read_request_json,  # noqa: F401
     _setup_file_logging,  # noqa: F401
     is_anthropic_auth,  # noqa: F401
+    is_passthrough_model,
     jitter_delay_ms,
     resolve_display_provider,
     retry_after_ms,
@@ -4835,7 +4836,11 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                         "input_tokens_optimized": log.get("input_tokens_optimized"),
                         "tokens_saved": log.get("tokens_saved"),
                         "savings_percent": log.get("savings_percent"),
+                        "cache_read_tokens": log.get("cache_read_tokens"),
+                        "cache_write_tokens": log.get("cache_write_tokens"),
                         "transforms_applied": log.get("transforms_applied", []),
+                        "tool_schema_saved_tokens": _tool_schema_saved_from_tags(log.get("tags")),
+                        "passthrough": is_passthrough_model(log.get("model")),
                         "request_messages": log.get("request_messages"),
                         "compressed_messages": log.get("compressed_messages"),
                         "response_content": log.get("response_content"),

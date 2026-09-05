@@ -43,6 +43,38 @@ IMAGE_BASE64_REPLACEMENT_TEMPLATE = request_log_redaction_policy.IMAGE_BASE64_RE
 IMAGE_BEARING_FIELD_NAMES = request_log_redaction_policy.IMAGE_BEARING_FIELD_NAMES
 _is_base64_image_payload = request_log_redaction_policy.is_base64_image_payload
 
+# D1G-2249: bound at store time how much stored text a single message body
+# can hold. Without this, one 900k-token conversation stored under
+# ``log_full_messages`` is ~2.6MB on its own; this caps any one string leaf
+# (a message's ``content``, a text block's ``text``, a tool_result's nested
+# text, ...) so a single huge entry cannot dominate memory even before the
+# MESSAGE_BODY_RETENTION window below kicks in.
+MAX_STORED_TEXT_CHARS = 4_000
+
+
+def truncate_stored_text(value: Any, *, limit: int = MAX_STORED_TEXT_CHARS) -> Any:
+    """Recursively truncate every string leaf in ``value`` to ``limit`` chars.
+
+    Walks dicts and lists (the shape of a messages array or a single
+    ``response_content`` string) and truncates any string longer than
+    ``limit``, appending a visible ``…[truncated N chars]`` marker so the
+    dashboard and ``headroom inspect`` never render a silently-clipped body
+    as if it were complete. Idempotent — truncating twice is a no-op because
+    the marker keeps the result under the limit... except the marker itself
+    adds a few characters, which is fine: it never grows unbounded.
+    """
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        overflow = len(value) - limit
+        return f"{value[:limit]}…[truncated {overflow} chars]"
+    if isinstance(value, list):
+        return [truncate_stored_text(v, limit=limit) for v in value]
+    if isinstance(value, dict):
+        return {k: truncate_stored_text(v, limit=limit) for k, v in value.items()}
+    return value
+
+
 logger = logging.getLogger(__name__)
 
 # Constants for log redaction counter export (Prometheus). The
@@ -92,11 +124,25 @@ class RequestLogger:
 
     MAX_LOG_ENTRIES = 10_000
 
+    # D1G-2249: even with MAX_LOG_ENTRIES bounding entry *count*, storing full
+    # request/compressed/response bodies on all 10,000 entries under
+    # ``log_full_messages`` is unbounded in bytes — a 900k-token conversation
+    # is ~2.6MB per entry. Only the most recent MESSAGE_BODY_RETENTION entries
+    # keep their bodies; older entries have request_messages/
+    # compressed_messages/response_content dropped (set to None) as new
+    # entries arrive, but keep every other field (token counts, transforms,
+    # ...) so they still count towards stats.
+    MESSAGE_BODY_RETENTION = 100
+
     def __init__(self, log_file: str | None = None, log_full_messages: bool = False):
         self.log_file = Path(log_file) if log_file else None
         self.log_full_messages = log_full_messages
         # Use deque with maxlen for automatic FIFO eviction
         self._logs: deque[RequestLog] = deque(maxlen=self.MAX_LOG_ENTRIES)
+        # Tracks only the entries that currently hold message bodies, oldest
+        # first, so we can clear the one about to fall out of the retention
+        # window in O(1) instead of sweeping ``self._logs`` on every call.
+        self._body_retention: deque[RequestLog] = deque(maxlen=self.MESSAGE_BODY_RETENTION)
 
         if self.log_file:
             try:
@@ -117,17 +163,45 @@ class RequestLogger:
         are redacted before write. Redaction also applies to the in-memory
         deque so the ``/stats/recent_requests`` endpoint never serves a
         multi-MB image either.
+
+        D1G-2249: after redaction, remaining text is truncated to
+        ``MAX_STORED_TEXT_CHARS`` per string leaf, and bodies are dropped
+        entirely from entries older than ``MESSAGE_BODY_RETENTION`` — see the
+        class docstring constants above.
         """
         # Redact image payloads in-place on the deque entry so memory
         # use stays bounded. We mutate the dataclass fields rather
         # than wrapping the entry to keep ``get_recent`` /
         # ``get_recent_with_messages`` unchanged.
         if entry.request_messages is not None:
-            entry.request_messages = redact_image_base64(entry.request_messages)
+            entry.request_messages = truncate_stored_text(
+                redact_image_base64(entry.request_messages)
+            )
         if entry.compressed_messages is not None:
-            entry.compressed_messages = redact_image_base64(entry.compressed_messages)
+            entry.compressed_messages = truncate_stored_text(
+                redact_image_base64(entry.compressed_messages)
+            )
         if entry.response_content is not None:
-            entry.response_content = redact_image_base64(entry.response_content)
+            entry.response_content = truncate_stored_text(
+                redact_image_base64(entry.response_content)
+            )
+
+        has_body = (
+            entry.request_messages is not None
+            or entry.compressed_messages is not None
+            or entry.response_content is not None
+        )
+        if has_body:
+            retention = self._body_retention
+            if len(retention) == retention.maxlen:
+                # About to be evicted by the append below — clear its bodies
+                # now rather than relying on it being garbage collected,
+                # since the same object is still referenced from self._logs.
+                aged_out = retention[0]
+                aged_out.request_messages = None
+                aged_out.compressed_messages = None
+                aged_out.response_content = None
+            retention.append(entry)
 
         self._logs.append(entry)
 

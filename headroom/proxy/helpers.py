@@ -1159,6 +1159,24 @@ def resolve_display_provider(
     return classify_openai_upstream(openai_api_url) or raw
 
 
+def is_passthrough_model(model: str | None) -> bool:
+    """Return True for a logged request that never went through real compression.
+
+    Passthrough endpoints (batches, embeddings, moderations, audio, ...) are
+    named ``passthrough:<endpoint>`` by ``_passthrough_model_from_path`` and
+    the ``ProviderPassthroughRoute`` tables. Anthropic's
+    ``/v1/messages/count_tokens`` route is one of those and is logged as
+    ``passthrough:count_tokens``. This mirrors the substring check
+    :mod:`headroom.proxy.cost` already uses to exclude these entries from
+    compression-rate reporting (``"count_tokens" in entry.model``) so the
+    transformations feed and the cost dashboard agree on what counts as
+    "not a real compression".
+    """
+    if not model:
+        return False
+    return model.startswith("passthrough:") or "count_tokens" in model
+
+
 # Body-too-large status code (PR-A8 / P5-59). Default 413 (RFC 7231 §6.5.11).
 # Configurable via HEADROOM_PROXY_BODY_TOO_LARGE_STATUS for operators who need
 # to override (no expected production use; documentation knob).

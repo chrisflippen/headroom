@@ -24,35 +24,49 @@ stateful aging pass would either flip an already-aged stub back to raw
 text (undoing its own savings) or never settle into a stable, cacheable
 prefix.
 
-Batching rule, in plain words
-------------------------------
-Aging candidates one at a time — the instant the session crosses the
-trigger, stub the single oldest tool result — would rewrite the leading
-part of the request on almost every turn, and every turn that rewrites a
-byte the provider already has cached busts the provider's prompt cache
-from that point on. Instead, candidates are grouped into batches of
-``batch_tokens`` (default 10,000) tokens, oldest first, and only whole,
-already-full batches get aged. The newest, still-filling batch is left
-alone until it fills up too. Concretely:
+Rung rule, in plain words
+--------------------------
+Every change to the aged set rewrites the leading part of the request,
+and every turn that rewrites a byte the provider already has cached busts
+the provider's prompt cache from that point on: the whole conversation is
+re-sent at the cache-write price instead of the cache-read price, about
+twelve times dearer. So the rule is not "how much can we retire" but "how
+rarely can we change what is retired while still retiring enough".
+
+The first version of this module aged in fixed 10,000-token batches. On
+the night of 5–6 September 2026 that rewrote a 300k-token conversation
+every three to six turns: the aging saved about 2 million base-priced
+tokens of reads and cost about 10 million in cache rewrites. Fixed
+batches make the number of rewrites grow in step with the conversation.
+
+Instead, the boundary climbs a ladder of doubling rungs:
+``first_batch_tokens``, twice that, four times, and so on. Concretely:
 
 1. List every aging candidate oldest to newest and take a running token
    total (a cumulative sum) as you walk the list.
-2. Take the grand total across every candidate and divide by
-   ``batch_tokens``, rounding down, to get how many whole batches exist
-   right now.
-3. Multiply that back out (``whole_batches * batch_tokens``) to get the
-   token count at the boundary of the last complete batch.
-4. Walk the running total from the front and stop at the first candidate
+2. Take the grand total across every candidate. The boundary is the
+   largest rung that fits under it; below the first rung nothing is aged.
+3. Walk the running total from the front and stop at the first candidate
    whose running total reaches that boundary. Every candidate up to and
-   including that one is aged; everything after it (the partially-filled
-   next batch) is left as raw text for now.
+   including that one is aged; everything after it is left as raw text
+   until the next rung is reached.
 
-Because the running total only grows as the conversation grows, the
-boundary computed in step 3 only ever moves forward, and the walk in step
-4 always lands on the same candidate or a later one than it did last
-time. So a block that becomes a stub never flips back to raw text later,
-and the set of aged blocks only grows in whole-batch jumps — the cached
-prefix gets rewritten once per full batch, not on every single turn.
+Because the running total only grows as the conversation grows, the rung
+only ever moves up, and the walk in step 3 always lands on the same
+candidate or a later one than it did last time. So a block that becomes a
+stub never flips back to raw text, and the aged set changes only when the
+candidates double — the cached prefix is rewritten a logarithmic number
+of times over the life of a session, not once per batch.
+
+Why the first rung is 128,000 tokens: a rewrite of a conversation of C
+tokens costs about 1.15·C base-priced tokens (a cache write at 1.25× in
+place of a cache read at 0.1×). Aging T tokens then saves 0.1·T per turn
+until the next rung, which arrives after roughly T/g turns where g is the
+tool-result tokens a turn adds (about 5k in a Claude Code session). The
+rewrite pays for itself when T² ≥ 11.5·C·g. With the 150k trigger, the
+first rung is reached at C ≈ 280k, and 128k² ≈ 11.5·280k·5k, so the first
+rewrite breaks even and every later rung, being twice as large, pays
+back more than twice as much.
 
 Scope
 -----
@@ -77,7 +91,8 @@ logger = logging.getLogger("headroom.proxy")
 
 DEFAULT_TRIGGER_TOKENS = 150_000
 DEFAULT_KEEP_NEWEST = 20
-DEFAULT_BATCH_TOKENS = 10_000
+# See "Why the first rung is 128,000 tokens" in the module docstring.
+DEFAULT_FIRST_BATCH_TOKENS = 128_000
 # 36 hours — long enough to outlive a day-long session. The CCR store's own
 # default TTL (30 minutes, DEFAULT_CCR_TTL_SECONDS in compression_store.py)
 # is sized for ordinary compression entries and would expire long before a
@@ -128,7 +143,7 @@ class ToolResultAgingConfig:
     enabled: bool = True
     trigger_tokens: int = DEFAULT_TRIGGER_TOKENS
     keep_newest: int = DEFAULT_KEEP_NEWEST
-    batch_tokens: int = DEFAULT_BATCH_TOKENS
+    first_batch_tokens: int = DEFAULT_FIRST_BATCH_TOKENS
     ttl_seconds: int = DEFAULT_TTL_SECONDS
 
     @classmethod
@@ -137,7 +152,9 @@ class ToolResultAgingConfig:
             enabled=_env_bool("HEADROOM_AGING_ENABLED", True),
             trigger_tokens=_env_int("HEADROOM_AGING_TRIGGER_TOKENS", DEFAULT_TRIGGER_TOKENS),
             keep_newest=_env_int("HEADROOM_AGING_KEEP_NEWEST", DEFAULT_KEEP_NEWEST),
-            batch_tokens=_env_int("HEADROOM_AGING_BATCH_TOKENS", DEFAULT_BATCH_TOKENS),
+            first_batch_tokens=_env_int(
+                "HEADROOM_AGING_FIRST_BATCH_TOKENS", DEFAULT_FIRST_BATCH_TOKENS
+            ),
             ttl_seconds=_env_int("HEADROOM_AGING_TTL_SECONDS", DEFAULT_TTL_SECONDS),
         )
 
@@ -334,9 +351,20 @@ def _collect_candidates(
     return candidates
 
 
-def _select_aged_batch(candidates: list[_Candidate], batch_tokens: int) -> list[_Candidate]:
-    """Batch-boundary walk — see the module docstring for the plain-words rule."""
-    if not candidates or batch_tokens <= 0:
+def _largest_rung_at_or_below(total: int, first_rung: int) -> int:
+    """The largest of ``first_rung, 2*first_rung, 4*first_rung, ...`` that is
+    at most ``total``; ``0`` when ``total`` is below the first rung."""
+    if first_rung <= 0 or total < first_rung:
+        return 0
+    rung = first_rung
+    while rung * 2 <= total:
+        rung *= 2
+    return rung
+
+
+def _select_aged_batch(candidates: list[_Candidate], first_batch_tokens: int) -> list[_Candidate]:
+    """Rung-boundary walk — see the module docstring for the plain-words rule."""
+    if not candidates:
         return []
 
     cumulative = 0
@@ -345,11 +373,9 @@ def _select_aged_batch(candidates: list[_Candidate], batch_tokens: int) -> list[
         cumulative += c.tokens
         cumsum.append(cumulative)
 
-    total = cumsum[-1]
-    whole_batches = total // batch_tokens
-    if whole_batches == 0:
+    boundary = _largest_rung_at_or_below(cumsum[-1], first_batch_tokens)
+    if boundary == 0:
         return []
-    boundary = whole_batches * batch_tokens
 
     cutoff = 0
     for i, running in enumerate(cumsum):
@@ -396,7 +422,7 @@ def age_tool_results(
     if not candidates:
         return AgingResult(messages=messages)
 
-    aged_candidates = _select_aged_batch(candidates, config.batch_tokens)
+    aged_candidates = _select_aged_batch(candidates, config.first_batch_tokens)
     if not aged_candidates:
         return AgingResult(messages=messages)
 

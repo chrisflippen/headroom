@@ -116,7 +116,7 @@ def test_old_tool_results_are_aged_on_the_wire(
     monkeypatch.setattr("headroom.cache.compression_store.get_compression_store", lambda: store)
     monkeypatch.setenv("HEADROOM_AGING_TRIGGER_TOKENS", "2000")
     monkeypatch.setenv("HEADROOM_AGING_KEEP_NEWEST", "2")
-    monkeypatch.setenv("HEADROOM_AGING_BATCH_TOKENS", "500")
+    monkeypatch.setenv("HEADROOM_AGING_FIRST_BATCH_TOKENS", "500")
 
     n_results = 8
     sent = _conversation(n_results, chars_per_result=3000)

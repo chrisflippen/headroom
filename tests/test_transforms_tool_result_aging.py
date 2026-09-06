@@ -1,8 +1,9 @@
 """Tests for headroom.transforms.tool_result_aging.
 
 Covers the purity/idempotency contract (same input -> same output, aged
-blocks never un-age as the conversation grows), the batch-boundary
-algorithm, the candidate-eligibility filters (keep_newest, already-marked,
+blocks never un-age as the conversation grows), the doubling-rung
+boundary rule (rewrites of the cached prefix grow logarithmically with
+the conversation, not linearly), the candidate-eligibility filters (keep_newest, already-marked,
 non-text, CCR-tool results), and fail-open behavior when the tokenizer or
 the CCR store errors.
 """
@@ -71,7 +72,7 @@ def _config(**overrides: Any) -> ToolResultAgingConfig:
         "enabled": True,
         "trigger_tokens": 1000,
         "keep_newest": 2,
-        "batch_tokens": 2000,
+        "first_batch_tokens": 2000,
         "ttl_seconds": 3600,
     }
     base.update(overrides)
@@ -81,6 +82,19 @@ def _config(**overrides: Any) -> ToolResultAgingConfig:
 @pytest.fixture
 def tokenizer() -> Tokenizer:
     return Tokenizer(EstimatingTokenCounter())
+
+
+def _aged_ids(messages: list[dict[str, Any]]) -> frozenset[str]:
+    """tool_use_ids of every tool_result that is currently a stub."""
+    ids: set[str] = set()
+    for m in messages:
+        if m.get("role") != "user" or not isinstance(m.get("content"), list):
+            continue
+        for block in m["content"]:
+            text = block.get("content") if isinstance(block, dict) else None
+            if isinstance(text, str) and "aged tool result" in text:
+                ids.add(block["tool_use_id"])
+    return frozenset(ids)
 
 
 def _stubbed_texts(messages: list[dict[str, Any]]) -> list[str]:
@@ -118,9 +132,9 @@ class TestGating:
 
 
 class TestBatching:
-    def test_ages_only_whole_batches_and_keeps_newest(self, tokenizer: Tokenizer) -> None:
+    def test_ages_only_whole_rungs_and_keeps_newest(self, tokenizer: Tokenizer) -> None:
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=3000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=3000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
 
         assert result.aged_block_count > 0
@@ -137,9 +151,66 @@ class TestBatching:
             assert isinstance(block["content"], str)
             assert "aged tool result" not in block["content"]
 
+    def test_nothing_is_aged_below_the_first_rung(self, tokenizer: Tokenizer) -> None:
+        # 30 results of ~1k tokens each = ~28k candidate tokens: below a
+        # 50k first rung nothing may be aged, however far past the trigger.
+        messages = _make_conversation(30, chars_per_result=4000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=50_000)
+        result = age_tool_results(messages, tokenizer=tokenizer, config=config)
+        assert result.aged_block_count == 0
+        assert result.messages is messages
+
+    def test_aged_tokens_land_on_the_largest_rung_below_the_total(
+        self, tokenizer: Tokenizer
+    ) -> None:
+        # Rungs are first, 2*first, 4*first, ... The aged set stops at the
+        # first candidate whose running total reaches the largest rung that
+        # fits, so aged_tokens is at least that rung and at most one block over.
+        messages = _make_conversation(60, chars_per_result=4000)
+        first = 3000
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=first)
+        result = age_tool_results(messages, tokenizer=tokenizer, config=config)
+
+        per_block = tokenizer.count_text(messages[1]["content"][0]["content"])
+        candidate_total = per_block * (60 - 2)
+        rung = first
+        while rung * 2 <= candidate_total:
+            rung *= 2
+        assert rung <= result.aged_tokens < rung + per_block
+
+    def test_prefix_rewrites_grow_logarithmically_not_linearly(self, tokenizer: Tokenizer) -> None:
+        # Grow one conversation a block at a time and count how often the
+        # aged set changes. Every change is a rewrite of the provider's
+        # cached prefix, which costs a full re-send of the conversation, so
+        # the count must be logarithmic in the conversation's size. With
+        # fixed 2k batches this walk would rewrite ~30 times; with doubling
+        # rungs it is bounded by log2(total / first) + 1.
+        first = 2000
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=first)
+        messages: list[dict[str, Any]] = []
+        previous: frozenset[str] = frozenset()
+        rewrites = 0
+        for i in range(64):
+            messages = messages + _make_conversation(1, chars_per_result=4000, id_prefix=f"g{i}")
+            result = age_tool_results(messages, tokenizer=tokenizer, config=config)
+            aged = _aged_ids(result.messages)
+            if aged != previous:
+                rewrites += 1
+            previous = aged
+
+        per_block = tokenizer.count_text(messages[1]["content"][0]["content"])
+        candidate_total = per_block * (64 - 2)
+        max_rewrites = 1
+        rung = first
+        while rung * 2 <= candidate_total:
+            rung *= 2
+            max_rewrites += 1
+        assert rewrites <= max_rewrites
+        assert rewrites >= 2  # it did age, and it did step up at least once
+
     def test_purity_same_input_same_output(self, tokenizer: Tokenizer) -> None:
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=3000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=3000)
 
         r1 = age_tool_results(messages, tokenizer=tokenizer, config=config)
         # Store keying is content-derived; a fresh store must reproduce the
@@ -151,7 +222,7 @@ class TestBatching:
         assert r1.aged_block_count == r2.aged_block_count
 
     def test_monotonic_growth_never_unages(self, tokenizer: Tokenizer) -> None:
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=3000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=3000)
         base = _make_conversation(20, chars_per_result=4000, id_prefix="base")
         r1 = age_tool_results(base, tokenizer=tokenizer, config=config)
 
@@ -174,9 +245,9 @@ class TestBatching:
                 text2 = block2.get("content")
                 assert isinstance(text2, str) and "aged tool result" in text2
 
-    def test_batch_tokens_zero_disables_aging_safely(self, tokenizer: Tokenizer) -> None:
+    def test_first_batch_tokens_zero_disables_aging_safely(self, tokenizer: Tokenizer) -> None:
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=0)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=0)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
         assert result.aged_block_count == 0
 
@@ -184,7 +255,7 @@ class TestBatching:
 class TestStubFormat:
     def test_stub_contains_retrievable_hash_and_tool_name(self, tokenizer: Tokenizer) -> None:
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=3000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=3000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
 
         assert result.aged_hashes
@@ -199,7 +270,7 @@ class TestStubFormat:
 
     def test_retrievable_from_ccr_store(self, tokenizer: Tokenizer) -> None:
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=3000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=3000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
 
         assert result.aged_hashes
@@ -214,7 +285,7 @@ class TestEligibilityFilters:
         messages = _make_conversation(30, chars_per_result=4000)
         # Pre-mark an early tool_result as already aged/retrievable.
         messages[1]["content"][0]["content"] = "Retrieve original: hash=deadbeef"
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=1000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=1000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
         # It should pass through byte-identical, not be re-wrapped.
         untouched = result.messages[1]["content"][0]["content"]
@@ -225,7 +296,7 @@ class TestEligibilityFilters:
         messages[1]["content"][0]["content"] = [
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}
         ]
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=1000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=1000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
         block = result.messages[1]["content"][0]
         assert block["content"][0]["type"] == "image"
@@ -236,7 +307,7 @@ class TestEligibilityFilters:
         messages = _make_conversation(30, chars_per_result=4000)
         messages.insert(0, _tool_use_message("ccr_1", CCR_TOOL_NAME, {"hash": "abc"}))
         messages.insert(1, _tool_result_message("ccr_1", _big_text(4000, "z")))
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=1000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=1000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
         block = result.messages[1]["content"][0]
         assert "aged tool result" not in block["content"]
@@ -269,7 +340,7 @@ class TestFailOpen:
         monkeypatch.setattr(store_mod, "get_compression_store", lambda: ExplodingStore())
 
         messages = _make_conversation(30, chars_per_result=4000)
-        config = _config(trigger_tokens=1000, keep_newest=2, batch_tokens=1000)
+        config = _config(trigger_tokens=1000, keep_newest=2, first_batch_tokens=1000)
         result = age_tool_results(messages, tokenizer=tokenizer, config=config)
         assert result.aged_block_count == 0
         assert result.messages is messages
@@ -281,7 +352,7 @@ class TestConfigFromEnv:
             "HEADROOM_AGING_ENABLED",
             "HEADROOM_AGING_TRIGGER_TOKENS",
             "HEADROOM_AGING_KEEP_NEWEST",
-            "HEADROOM_AGING_BATCH_TOKENS",
+            "HEADROOM_AGING_FIRST_BATCH_TOKENS",
             "HEADROOM_AGING_TTL_SECONDS",
         ):
             monkeypatch.delenv(var, raising=False)
@@ -289,7 +360,7 @@ class TestConfigFromEnv:
         assert config.enabled is True
         assert config.trigger_tokens == 150_000
         assert config.keep_newest == 20
-        assert config.batch_tokens == 10_000
+        assert config.first_batch_tokens == 128_000
         assert config.ttl_seconds == 36 * 60 * 60
 
     def test_from_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:

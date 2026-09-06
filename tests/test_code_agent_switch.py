@@ -66,6 +66,7 @@ def test_ensure_agent_switch_preserves_unrelated_keys(tmp_path: Path) -> None:
         "mcp__headroom__Search",
         "mcp__headroom__Edit",
         "mcp__headroom__Sql",
+        "mcp__headroom__Run",
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
@@ -81,6 +82,7 @@ _EXPECTED_ALLOW_RULES = [
     "mcp__headroom__Search",
     "mcp__headroom__Edit",
     "mcp__headroom__Sql",
+    "mcp__headroom__Run",
     "mcp__headroom__headroom_compress",
     "mcp__headroom__headroom_retrieve",
     "mcp__headroom__headroom_stats",
@@ -121,10 +123,11 @@ def test_ensure_agent_switch_does_not_duplicate_a_pre_existing_allow_rule(
 
     payload = json.loads(settings_path.read_text())
     assert payload["permissions"]["allow"] == _EXPECTED_ALLOW_RULES
-    # Only the five rules that were not already there were newly added.
+    # Only the six rules that were not already there were newly added.
     assert payload["_headroom_managed"]["permissions_added"] == [
         "mcp__headroom__Edit",
         "mcp__headroom__Sql",
+        "mcp__headroom__Run",
         "mcp__headroom__headroom_compress",
         "mcp__headroom__headroom_retrieve",
         "mcp__headroom__headroom_stats",
@@ -172,7 +175,7 @@ def test_agent_switch_state_on_after_ensure(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (7 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (8 allow rules)"
 
 
 def test_agent_switch_state_reports_user_set_value(tmp_path: Path) -> None:
@@ -189,7 +192,7 @@ def test_agent_switch_state_reports_the_taken_over_value(tmp_path: Path) -> None
     settings_path.write_text(json.dumps({"agent": "woz:code-free"}) + "\n")
     code_agent.ensure_agent_switch(settings_path)
 
-    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 7 allow rules)"
+    assert code_agent.agent_switch_state(settings_path) == "on (was: woz:code-free; 8 allow rules)"
 
 
 # ---------------------------------------------------------------------------

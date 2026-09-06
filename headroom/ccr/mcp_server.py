@@ -96,6 +96,7 @@ STATS_TOOL_NAME = "headroom_stats"
 SEARCH_TOOL_NAME = "Search"
 EDIT_TOOL_NAME = "Edit"
 SQL_TOOL_NAME = "Sql"
+RUN_TOOL_NAME = "Run"
 SEND_MESSAGE_TOOL_NAME = "SendMessage"
 
 logger = logging.getLogger("headroom.ccr.mcp")
@@ -837,6 +838,51 @@ class HeadroomMCPServer:
                 },
             ),
             Tool(
+                name=RUN_TOOL_NAME,
+                description=(
+                    "Run a shell command and get back shaped output — use this instead of "
+                    "the built-in Bash for anything whose output could exceed a screen "
+                    "(tests, builds, logs, `git log`/`diff`, `ls -R`, `curl`). The reply is a "
+                    "totals line, then the first and last lines of output with repeats "
+                    "collapsed and long lines clipped; if it says lines were omitted and you "
+                    "need them, retrieve the hash with headroom_retrieve rather than "
+                    "re-running the command. Bash stays better for tiny commands and "
+                    "interactive things."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run.",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": (
+                                "Directory to run the command in, relative to the project "
+                                "root or absolute. Must resolve inside the launch directory, "
+                                "a sibling git worktree of it, or a directory added with "
+                                "`headroom code-agent roots add`. Defaults to the launch "
+                                "directory."
+                            ),
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "Kill the command after this many seconds. Default 120, max 600.",
+                        },
+                        "head": {
+                            "type": "integer",
+                            "description": "How many lines to keep from the start of the output. Default 40.",
+                        },
+                        "tail": {
+                            "type": "integer",
+                            "description": "How many lines to keep from the end of the output. Default 40.",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            ),
+            Tool(
                 name=SQL_TOOL_NAME,
                 description=(
                     "Run a read-only SQL query, or look at the schema, for a database "
@@ -937,6 +983,7 @@ class HeadroomMCPServer:
             SEARCH_TOOL_NAME: self._handle_search,
             EDIT_TOOL_NAME: self._handle_edit,
             SQL_TOOL_NAME: self._handle_sql,
+            RUN_TOOL_NAME: self._handle_run,
             SEND_MESSAGE_TOOL_NAME: self._handle_send_message,
         }
 
@@ -1204,6 +1251,13 @@ class HeadroomMCPServer:
         from headroom.code_tools import edit as code_tools_edit
 
         text = code_tools_edit.edit(arguments, Path.cwd())
+        return [TextContent(type="text", text=text)]
+
+    async def _handle_run(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """Handle the Run tool call by running it against code_tools.run."""
+        from headroom.code_tools import run as code_tools_run
+
+        text = code_tools_run.run(arguments, Path.cwd())
         return [TextContent(type="text", text=text)]
 
     async def _handle_sql(self, arguments: dict[str, Any]) -> list[TextContent]:

@@ -27,8 +27,13 @@ headroom's own tools instead of the built-in ones.
   the database directly does not.
 - Bash stays available for running commands, tests, and scripts. It is not a substitute
   for Search, Edit, or Sql.
-- The agent switch that made this agent the default also grants Search, Edit, Sql, and
-  memory in `permissions.allow`, so none of them ever stop to ask for permission.
+- Use `Run` instead of Bash for any command whose output could exceed a screen — tests,
+  builds, logs, `git log`/`diff`, `ls -R`, `curl`. It gives back a short totals line plus
+  the start and end of the output, not the whole thing. Bash stays better for tiny
+  commands and interactive things. If `Run` says lines were omitted and you need them,
+  call `headroom_retrieve` with the hash it gives you instead of re-running the command.
+- The agent switch that made this agent the default also grants Search, Edit, Sql, Run,
+  and memory in `permissions.allow`, so none of them ever stop to ask for permission.
 
 ## Delegating to helpers
 

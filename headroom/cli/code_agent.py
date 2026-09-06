@@ -69,12 +69,14 @@ _PERMISSIONS_ADDED_KEY = "permissions_added"
 # so `off`/`remove` take out only what headroom itself added and leave a
 # rule alone if the user already had it.
 CODE_AGENT_ALLOW_RULES: tuple[str, ...] = (
-    # The code agent's own file, edit, and database tools on the headroom
-    # MCP server -- what the agent uses instead of the built-in Read, Edit,
-    # Write, Grep, and Glob.
+    # The code agent's own file, edit, database, and command tools on the
+    # headroom MCP server -- what the agent uses instead of the built-in
+    # Read, Edit, Write, Grep, and Glob, and (for anything whose output
+    # could exceed a screen) instead of Bash.
     "mcp__headroom__Search",
     "mcp__headroom__Edit",
     "mcp__headroom__Sql",
+    "mcp__headroom__Run",
     # Headroom's own compression tools, on the same MCP server: compress
     # content on demand, retrieve original content behind a "[Retrieve
     # more: hash=...]" marker, and read session compression stats.

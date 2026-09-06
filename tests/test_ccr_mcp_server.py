@@ -647,6 +647,26 @@ def test_call_tool_search_reads_a_file_in_a_sibling_worktree(
 
 
 # ---------------------------------------------------------------------------
+# Run: shaped command output, via the MCP dispatch entry point
+# ---------------------------------------------------------------------------
+
+
+def test_call_tool_run_returns_shaped_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``call_tool`` (the MCP dispatch entry point, not just the private
+    ``_handle_run`` helper) runs the command in the server's launch
+    directory and returns Run's shaped totals-line-plus-body text."""
+
+    monkeypatch.chdir(tmp_path)
+
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    response = asyncio.run(server._call_tool_handler("Run", {"command": "printf 'hello\\n'"}))
+
+    text = response[0].kwargs["text"]
+    assert text.startswith("exit=0 lines=1 chars=6 time=")
+    assert text.endswith("hello")
+
+
+# ---------------------------------------------------------------------------
 # SendMessage: messaging another Claude Code session on this machine
 # ---------------------------------------------------------------------------
 

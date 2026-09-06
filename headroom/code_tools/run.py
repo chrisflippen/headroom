@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from headroom import _subprocess
+from headroom._subprocess import run as _run_subprocess
 from headroom.code_tools.files import PathOutsideRootError, resolve_path
 
 _DEFAULT_TIMEOUT_SECONDS = 120
@@ -137,7 +137,7 @@ def run(request: dict[str, Any], root: Path) -> str:
     started = time.monotonic()
     timed_out = False
     try:
-        completed = _subprocess.run(
+        completed = _run_subprocess(
             [_SHELL, "-lc", command],
             cwd=str(cwd),
             stdout=subprocess.PIPE,

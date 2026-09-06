@@ -765,6 +765,27 @@ def code_agent_skills_ensure() -> None:
         )
 
 
+def _hook_payload(*required: str) -> dict[str, Any] | None:
+    """Read a Claude Code hook's stdin JSON.
+
+    Returns None -- so the caller can exit 0 with nothing printed -- when
+    stdin is missing or not valid JSON, is not an object, or any ``required``
+    field is missing or not a non-empty string. A broken hook must never
+    block the prompt, compaction, or session start it is attached to.
+    """
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in required:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value:
+            return None
+    return payload
+
+
 @code_agent_group.command("brief")
 def code_agent_brief() -> None:
     """Print a brief for the user's prompt, as a UserPromptSubmit hook.
@@ -782,17 +803,11 @@ def code_agent_brief() -> None:
     if os.environ.get(brief.RECURSION_GUARD_ENV):
         return
 
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
+    payload = _hook_payload("prompt", "cwd")
+    if payload is None:
         return
-    if not isinstance(payload, dict):
-        return
-
-    prompt = payload.get("prompt")
-    cwd = payload.get("cwd")
-    if not isinstance(prompt, str) or not isinstance(cwd, str):
-        return
+    prompt = payload["prompt"]
+    cwd = payload["cwd"]
 
     try:
         result = brief.make_brief(
@@ -831,19 +846,11 @@ def code_agent_digest_save() -> None:
     """
     from headroom.paths import workspace_dir
 
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
+    payload = _hook_payload("session_id", "transcript_path")
+    if payload is None:
         return
-    if not isinstance(payload, dict):
-        return
-
-    session_id = payload.get("session_id")
-    transcript_path = payload.get("transcript_path")
-    if not isinstance(session_id, str) or not session_id:
-        return
-    if not isinstance(transcript_path, str) or not transcript_path:
-        return
+    session_id = payload["session_id"]
+    transcript_path = payload["transcript_path"]
 
     try:
         text = digest.build_digest(Path(transcript_path))
@@ -879,16 +886,10 @@ def code_agent_digest_inject() -> None:
     """
     from headroom.paths import workspace_dir
 
-    try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
+    payload = _hook_payload("session_id")
+    if payload is None:
         return
-    if not isinstance(payload, dict):
-        return
-
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        return
+    session_id = payload["session_id"]
 
     try:
         text = digest.load_digest(session_id, workspace_dir() / "code_tools")

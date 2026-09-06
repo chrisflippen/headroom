@@ -443,7 +443,12 @@ def age_tool_results(
     if not aged_by_position:
         return AgingResult(messages=messages)
 
-    new_messages = copy.deepcopy(messages)
+    # Copy only the messages that change: the input is never mutated, and a
+    # deep copy of an 800-message conversation to touch a handful of blocks
+    # would cost more than the aging saves.
+    new_messages = list(messages)
+    for m_idx in {m for m, _ in aged_by_position}:
+        new_messages[m_idx] = copy.deepcopy(messages[m_idx])
     for (m_idx, b_idx), stub in aged_by_position.items():
         block = new_messages[m_idx]["content"][b_idx]
         inner = block.get("content")

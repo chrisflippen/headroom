@@ -362,7 +362,7 @@ def _largest_rung_at_or_below(total: int, first_rung: int) -> int:
     return rung
 
 
-def _select_aged_batch(candidates: list[_Candidate], first_batch_tokens: int) -> list[_Candidate]:
+def _select_aged_by_rung(candidates: list[_Candidate], first_batch_tokens: int) -> list[_Candidate]:
     """Rung-boundary walk — see the module docstring for the plain-words rule."""
     if not candidates:
         return []
@@ -422,7 +422,7 @@ def age_tool_results(
     if not candidates:
         return AgingResult(messages=messages)
 
-    aged_candidates = _select_aged_batch(candidates, config.first_batch_tokens)
+    aged_candidates = _select_aged_by_rung(candidates, config.first_batch_tokens)
     if not aged_candidates:
         return AgingResult(messages=messages)
 

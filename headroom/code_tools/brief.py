@@ -56,6 +56,12 @@ _MIN_WORDS = 12
 # cap or it is abandoned and the brief falls back to an empty context.
 _GATHER_BUDGET_SECONDS = 2.0
 
+# The two shapes a machine-generated `UserPromptSubmit` prompt takes: a
+# background task notification, and a system notification banner. Neither
+# is something Christopher typed, so neither should ever get a brief.
+_TASK_NOTIFICATION_PREFIX = "<task-notification>"
+_SYSTEM_NOTIFICATION_MARKER = "[SYSTEM NOTIFICATION - NOT USER INPUT]"
+
 _PLAIN_REPLIES = {
     "yes",
     "yeah",
@@ -138,6 +144,25 @@ def should_brief(prompt: str) -> bool:
     return True
 
 
+def is_machine_prompt(prompt: str) -> bool:
+    """True for a prompt Claude Code (or another tool) generated, not Christopher.
+
+    Covers the two machine-generated shapes seen on `UserPromptSubmit`: a
+    background task notification (`prompt` starts with `<task-notification>`)
+    and a system notification banner (contains the
+    `[SYSTEM NOTIFICATION - NOT USER INPUT]` marker) -- plus a prompt that is
+    only whitespace. `make_brief` skips all three before any model call:
+    briefing a task notification produces nonsense like "I'm a
+    brief-writing agent..." shown under a prompt Christopher never typed.
+    """
+    stripped = prompt.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(_TASK_NOTIFICATION_PREFIX):
+        return True
+    return _SYSTEM_NOTIFICATION_MARKER in prompt
+
+
 _T = TypeVar("_T")
 
 
@@ -179,14 +204,20 @@ def make_brief(
     """Return a brief for `prompt`, or `None` if none applies or it failed.
 
     Runs `should_brief` first -- when it is False, `gather` and
-    `model_runner` are never called. Gathering context gets its own small
-    cap (`_GATHER_BUDGET_SECONDS`, or all of `budget_seconds` if that is
-    smaller); a gatherer that runs past its cap or raises is abandoned in
-    favor of an empty context, rather than eating into the model call's
-    share. The model call gets whatever of `budget_seconds` is left; going
-    over that, or raising, yields `None` rather than propagating.
+    `model_runner` are never called. Also returns `None` immediately, before
+    either, for a machine-generated prompt (`is_machine_prompt`) -- a task
+    notification or system notification banner is not something Christopher
+    typed, and briefing one wastes a model call to produce nonsense. Gathering
+    context gets its own small cap (`_GATHER_BUDGET_SECONDS`, or all of
+    `budget_seconds` if that is smaller); a gatherer that runs past its cap or
+    raises is abandoned in favor of an empty context, rather than eating into
+    the model call's share. The model call gets whatever of `budget_seconds`
+    is left; going over that, or raising, yields `None` rather than
+    propagating.
     """
     if not should_brief(prompt):
+        return None
+    if is_machine_prompt(prompt):
         return None
 
     gather_budget = min(_GATHER_BUDGET_SECONDS, budget_seconds)

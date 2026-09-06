@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 
 from headroom.code_tools import brief as brief_module
-from headroom.code_tools.brief import GatheredContext, make_brief, should_brief
+from headroom.code_tools.brief import GatheredContext, is_machine_prompt, make_brief, should_brief
 
 
 def test_slash_command_is_not_briefed() -> None:
@@ -126,6 +126,62 @@ def test_make_brief_returns_none_when_model_runner_raises() -> None:
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# is_machine_prompt -- machine-generated prompts never get a brief.
+# ---------------------------------------------------------------------------
+
+
+def test_task_notification_is_a_machine_prompt() -> None:
+    assert is_machine_prompt("<task-notification>a background task finished") is True
+
+
+def test_system_notification_marker_is_a_machine_prompt() -> None:
+    prompt = "heads up [SYSTEM NOTIFICATION - NOT USER INPUT] something happened in the background"
+    assert is_machine_prompt(prompt) is True
+
+
+def test_whitespace_only_prompt_is_a_machine_prompt() -> None:
+    assert is_machine_prompt("   \n\t  ") is True
+
+
+def test_a_real_prompt_is_not_a_machine_prompt() -> None:
+    assert is_machine_prompt(_TASK_PROMPT) is False
+
+
+def test_make_brief_returns_none_for_a_task_notification_and_skips_model_call() -> None:
+    calls: list[tuple[str, str, float]] = []
+
+    def fake_model_runner(system: str, user: str, timeout: float) -> str:
+        calls.append((system, user, timeout))
+        return "I'm a brief-writing agent..."
+
+    long_notification = "<task-notification>" + " word" * 20
+
+    result = make_brief(
+        long_notification, cwd="/repo", gather=_fake_gather, model_runner=fake_model_runner
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_make_brief_returns_none_for_a_system_notification_and_skips_model_call() -> None:
+    calls: list[tuple[str, str, float]] = []
+
+    def fake_model_runner(system: str, user: str, timeout: float) -> str:
+        calls.append((system, user, timeout))
+        return "should not run"
+
+    long_notification = "some prefix [SYSTEM NOTIFICATION - NOT USER INPUT] " + "word " * 20
+
+    result = make_brief(
+        long_notification, cwd="/repo", gather=_fake_gather, model_runner=fake_model_runner
+    )
+
+    assert result is None
+    assert calls == []
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
@@ -172,6 +228,25 @@ def test_cli_brief_prints_nothing_for_a_slash_command(
     monkeypatch.setattr(brief_module, "default_model_runner", _unexpected_call)
 
     stdin = json.dumps({"prompt": "/compact", "cwd": "/repo", "session_id": "abc"})
+    result = cli_runner.invoke(main, ["code-agent", "brief"], input=stdin)
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_cli_brief_prints_nothing_for_a_task_notification(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from headroom.cli.main import main
+
+    def _unexpected_call(*args: object, **kwargs: object) -> str:
+        raise AssertionError("model runner must not run for a task notification")
+
+    monkeypatch.setattr(brief_module, "gather", _fake_gather)
+    monkeypatch.setattr(brief_module, "default_model_runner", _unexpected_call)
+
+    long_notification = "<task-notification>" + " word" * 20
+    stdin = json.dumps({"prompt": long_notification, "cwd": "/repo", "session_id": "abc"})
     result = cli_runner.invoke(main, ["code-agent", "brief"], input=stdin)
 
     assert result.exit_code == 0

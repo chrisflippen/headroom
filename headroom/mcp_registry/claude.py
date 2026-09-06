@@ -25,6 +25,14 @@ from .base import MCPRegistrar, RegisterResult, RegisterStatus, ServerSpec
 
 logger = logging.getLogger(__name__)
 
+# Claude Code (v2.1.121+) defers an MCP server's tool schemas behind
+# ToolSearch unless its config entry carries ``"alwaysLoad": true``. Headroom's
+# own tools (Search/Edit/Sql/...) are used on nearly every turn of a wrapped
+# session, so a search round-trip before the first use is pure overhead — set
+# the flag only on the "headroom" entry, never on user-managed entries like
+# "serena" this registrar also writes.
+_ALWAYS_LOAD_SERVER_NAME = "headroom"
+
 
 class ClaudeConfigMutationError(ValueError):
     """Raised when a Claude config cannot be safely changed."""
@@ -120,7 +128,9 @@ class ClaudeRegistrar(MCPRegistrar):
         existing = self.get_server(spec.name)
         if existing is not None:
             if _specs_equivalent(existing, spec):
-                return RegisterResult(RegisterStatus.ALREADY, "matches current configuration")
+                result = RegisterResult(RegisterStatus.ALREADY, "matches current configuration")
+                self._ensure_always_load(spec.name)
+                return result
             if not force:
                 return RegisterResult(
                     RegisterStatus.MISMATCH,
@@ -130,8 +140,12 @@ class ClaudeRegistrar(MCPRegistrar):
             self.unregister_server(spec.name)
 
         if self._claude_cli:
-            return self._register_via_cli(spec)
-        return self._register_via_file(spec)
+            result = self._register_via_cli(spec)
+        else:
+            result = self._register_via_file(spec)
+        if result.status == RegisterStatus.REGISTERED:
+            self._ensure_always_load(spec.name)
+        return result
 
     def unregister_server(self, server_name: str) -> bool:
         removed = False
@@ -259,6 +273,40 @@ class ClaudeRegistrar(MCPRegistrar):
         env["CLAUDE_CONFIG_DIR"] = str(self._modern_dir)
         return env
 
+    def _ensure_always_load(self, server_name: str) -> None:
+        """Patch the on-disk headroom entry to carry ``alwaysLoad: true``.
+
+        ``_register_via_file``/``_spec_to_entry`` already set the key on a
+        fresh write, so this is mainly for two cases that path never touches:
+        ``claude mcp add`` (the CLI has no flag for it) and an
+        already-registered entry from before this flag existed, which
+        short-circuits as :attr:`RegisterStatus.ALREADY` before any write
+        happens. Only ever touches the "headroom" entry — every other server
+        this registrar writes (e.g. "serena") is left exactly as it was.
+        Best-effort: a failure here must not turn an already-successful
+        registration into a failure.
+        """
+        if server_name != _ALWAYS_LOAD_SERVER_NAME:
+            return
+        for config_path in (self._modern_config, self._legacy_config):
+            if not config_path.exists():
+                continue
+            try:
+                config = _read_json_for_write(config_path)
+            except _MalformedConfigError:
+                continue
+            servers = config.get("mcpServers")
+            if not isinstance(servers, dict):
+                continue
+            entry = servers.get(server_name)
+            if not isinstance(entry, dict) or entry.get("alwaysLoad") is True:
+                continue
+            entry["alwaysLoad"] = True
+            try:
+                _write_json(config_path, config)
+            except OSError:
+                pass
+
 
 def _resolve_claude_config_dir(
     home: Path,
@@ -345,6 +393,8 @@ def _spec_to_entry(spec: ServerSpec) -> dict[str, Any]:
         entry["args"] = list(spec.args)
     if spec.env:
         entry["env"] = dict(spec.env)
+    if spec.name == _ALWAYS_LOAD_SERVER_NAME:
+        entry["alwaysLoad"] = True
     return entry
 
 

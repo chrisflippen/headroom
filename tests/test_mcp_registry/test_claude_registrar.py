@@ -267,6 +267,103 @@ def test_register_writes_to_claude_config_dir(
 
 
 # ----------------------------------------------------------------------
+# alwaysLoad — Claude Code's MCP tool-search opt-out (headroom entry only)
+# ----------------------------------------------------------------------
+
+
+def test_register_writes_file_sets_always_load_on_headroom(tmp_path: Path) -> None:
+    reg = _make_registrar(tmp_path, cli=None)
+    result = reg.register_server(_spec())
+    assert result.status == RegisterStatus.REGISTERED
+    data = json.loads((tmp_path / ".claude.json").read_text())
+    assert data["mcpServers"]["headroom"]["alwaysLoad"] is True
+
+
+def test_register_via_cli_patches_always_load_after_cli_writes_entry(tmp_path: Path) -> None:
+    """``claude mcp add`` has no flag for alwaysLoad, so once it succeeds the
+    registrar must patch the entry it wrote directly."""
+    reg = _make_registrar(tmp_path, cli="/usr/local/bin/claude")
+    cfg = tmp_path / ".claude.json"
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        # Simulate the real `claude` CLI writing the modern config, sans alwaysLoad.
+        cfg.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "headroom": {
+                            "command": _RESOLVED_COMMAND[0],
+                            "args": list(_RESOLVED_ARGS),
+                        }
+                    }
+                }
+            )
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = reg.register_server(_spec())
+
+    assert result.status == RegisterStatus.REGISTERED
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["headroom"]["alwaysLoad"] is True
+
+
+def test_register_already_patches_missing_always_load(tmp_path: Path) -> None:
+    """A pre-existing headroom entry from before this flag existed still gets
+    it, even though the spec otherwise matches (status stays ALREADY)."""
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "headroom": {
+                        "command": _RESOLVED_COMMAND[0],
+                        "args": list(_RESOLVED_ARGS),
+                    }
+                }
+            }
+        )
+    )
+    reg = _make_registrar(tmp_path, cli="/usr/local/bin/claude")
+    with patch("subprocess.run") as run_mock:
+        result = reg.register_server(_spec())
+    assert result.status == RegisterStatus.ALREADY
+    run_mock.assert_not_called()
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["headroom"]["alwaysLoad"] is True
+
+
+def test_register_headroom_does_not_add_always_load_to_other_servers(tmp_path: Path) -> None:
+    """Only the "headroom" entry gets alwaysLoad — a pre-existing "serena"
+    entry (also written by this registrar) is left byte-for-byte alone."""
+    cfg = tmp_path / ".claude.json"
+    other_entry = {"command": "uvx", "args": ["serena", "start-mcp-server"]}
+    cfg.write_text(json.dumps({"mcpServers": {"serena": other_entry}}))
+    reg = _make_registrar(tmp_path, cli=None)
+
+    result = reg.register_server(_spec())
+
+    assert result.status == RegisterStatus.REGISTERED
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["serena"] == other_entry
+    assert "alwaysLoad" not in data["mcpServers"]["serena"]
+    assert data["mcpServers"]["headroom"]["alwaysLoad"] is True
+
+
+def test_spec_to_entry_only_sets_always_load_for_headroom() -> None:
+    from headroom.mcp_registry.claude import _spec_to_entry
+
+    serena_spec = ServerSpec(name="serena", command="uvx", args=("serena", "start-mcp-server"))
+    entry = _spec_to_entry(serena_spec)
+    assert "alwaysLoad" not in entry
+
+    headroom_spec = _spec()
+    entry = _spec_to_entry(headroom_spec)
+    assert entry["alwaysLoad"] is True
+
+
+# ----------------------------------------------------------------------
 # register_server() — already / mismatch / force
 # ----------------------------------------------------------------------
 

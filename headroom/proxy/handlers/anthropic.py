@@ -58,6 +58,7 @@ from headroom.proxy.nonstream_sse_policy import should_recover_sse_reply
 from headroom.proxy.outcome import RequestOutcome
 from headroom.proxy.output_shaper import shaper_enabled_for, steering_allowed_for
 from headroom.proxy.thinking_tokens import ThinkingTokens, extract_thinking_tokens
+from headroom.transforms.tool_result_aging import ToolResultAgingConfig, age_tool_results
 
 logger = logging.getLogger("headroom.proxy")
 
@@ -1429,6 +1430,37 @@ class AnthropicHandlerMixin:
             # resolution may hit the network (HF download) and counting a full
             # conversation is CPU-bound — on-loop it froze the server (#1701).
             tokenizer, original_tokens = await self._count_tokens_offloaded(model, messages)
+
+            # Long-session trim: once a request is past the aging trigger,
+            # retire tool results older than the newest few into fixed stubs
+            # whose originals stay retrievable (transforms/tool_result_aging).
+            # This runs on the messages the prefix tracker records as this
+            # turn's originals, so the freeze/overlay machinery treats a newly
+            # aged batch as one deliberate prefix change and never replays
+            # the un-aged bytes back over the stubs. Off the event loop: it
+            # counts every candidate block. ``original_tokens`` keeps the
+            # pre-aging count so tok_before reflects what the client sent.
+            _aging_config = ToolResultAgingConfig.from_env()
+            if _aging_config.enabled and original_tokens > _aging_config.trigger_tokens:
+                _aging = await asyncio.to_thread(
+                    age_tool_results,
+                    messages,
+                    tokenizer=tokenizer,
+                    config=_aging_config,
+                    total_tokens=original_tokens,
+                )
+                if _aging.aged_block_count:
+                    messages = _aging.messages
+                    tags["aged_blocks"] = str(_aging.aged_block_count)
+                    tags["aged_tokens"] = str(_aging.aged_tokens)
+                    logger.info(
+                        "[%s] AGING aged_blocks=%d aged_tokens=%d trigger=%d keep_newest=%d",
+                        request_id,
+                        _aging.aged_block_count,
+                        _aging.aged_tokens,
+                        _aging_config.trigger_tokens,
+                        _aging_config.keep_newest,
+                    )
 
             # Enterprise Security: scan request before compression
             _security_ctx = None

@@ -700,6 +700,14 @@ async def emit_request_outcome(handler: Any, outcome: RequestOutcome) -> None:
     # key=value pairs after ``transforms=`` the same way it reads
     # ``client=``).
     cached_part = " cached=1" if outcome.from_response_cache else ""
+    # ``aged=<blocks>/<tokens>`` marks a turn where long-session trim
+    # (transforms/tool_result_aging) retired old tool results into
+    # retrievable stubs. Appended only when it fired, so every other PERF
+    # line is byte-for-byte unchanged and existing parsers keep working.
+    _tags = outcome.tags or {}
+    aged_part = (
+        f" aged={_tags['aged_blocks']}/{_tags['aged_tokens']}" if "aged_blocks" in _tags else ""
+    )
     # Tool-schema DEFERRAL savings can't move tok_before/after (those count messages
     # only), so a tool-heavy turn shows tok_saved=0 while genuinely saving thousands of
     # tool-definition tokens. `tool_saved` carries that component and `total_saved` is
@@ -726,4 +734,5 @@ async def emit_request_outcome(handler: Any, outcome: RequestOutcome) -> None:
         f"transforms={_summarize_transforms(list(outcome.transforms_applied))}"
         f"{client_part}"
         f"{cached_part}"
+        f"{aged_part}"
     )

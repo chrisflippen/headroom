@@ -2664,7 +2664,9 @@ class ContentRouter(Transform):
         # Resolved with `getattr` so the method still works on a bare instance
         # (`object.__new__(ContentRouter)`, used by unit tests that exercise the
         # folds without paying for a full router init).
-        memo = getattr(self, "_lossless_first_memo", None)
+        memo: dict[tuple[Any, ...], tuple[str, str | None]] | None = getattr(
+            self, "_lossless_first_memo", None
+        )
         if memo is None:
             memo = self._lossless_first_memo = {}
         # The provider generation is part of the key: this memo caches a value
@@ -2797,7 +2799,9 @@ class ContentRouter(Transform):
         if provider is None:
             return None
 
-        memo = getattr(self, "_lossless_provider_memo", None)
+        memo: dict[tuple[Any, ...], tuple[str, str] | None] | None = getattr(
+            self, "_lossless_provider_memo", None
+        )
         if memo is None:
             memo = self._lossless_provider_memo = {}
         memo_key = (hash(content), len(content), get_lossless_generation())

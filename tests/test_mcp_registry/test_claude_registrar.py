@@ -584,6 +584,7 @@ def test_register_via_file_preserves_malformed_config(tmp_path: Path, contents: 
     result = reg.register_server(_spec())
 
     assert result.status == RegisterStatus.FAILED
+    assert result.detail is not None
     assert "not valid JSON" in result.detail
     # The original bytes are untouched — nothing was overwritten.
     assert cfg.read_text(encoding="utf-8") == contents

@@ -109,61 +109,62 @@ DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787"
 # process under init/launchd. The watchdog reaps us once we are reparented.
 PARENT_DEATH_POLL_INTERVAL = 5.0
 
-# Edit calls in a row (each a single ``replace`` or ``create``) that earns a
-# one-line nudge toward batching, appended to that Edit call's own result.
-EDIT_BATCH_NUDGE_THRESHOLD = 5
+# Single ``replace`` calls in a row on the SAME file that earn a one-line
+# nudge toward ``multi``, appended to that Edit call's own result.
+EDIT_BATCH_NUDGE_THRESHOLD = 3
 EDIT_BATCH_NUDGE_MESSAGE = (
-    "Five single edits in a row. If the rest are the same kind of change, "
-    "hand the batch to the edit helper or use Edit multi."
+    "Three single edits to the same file in a row. "
+    "Use Edit multi for the rest of this file's changes."
 )
 
 
 class EditBatchNudge:
-    """Per-process counter that nudges toward batching after repeated single edits.
+    """Per-process streak counter: three single ``replace`` calls in a row on
+    the same file earn a nudge to use ``multi`` instead.
 
-    ``replace`` and ``create`` are the two Edit actions that touch exactly one
-    spot; five of those back-to-back suggest a batch that should have gone
-    through ``multi`` (or the edit helper) instead. ``multi`` is already a
-    batch, and a ``Search`` call means the agent moved on to something else —
-    both reset the streak.
-
-    Deliberately process-global rather than per-session or per-file: it is
-    tracking a *pattern of tool use*, not state tied to any one conversation.
-    A tiny class (not a bare closure) so tests can construct isolated
-    instances instead of sharing the module-level singleton.
+    Any other Edit action, a ``replace`` on a different file, or any Search
+    call breaks the streak. Process-global on purpose: it tracks a pattern of
+    tool use, not state tied to one conversation. A tiny class so tests can
+    construct isolated instances instead of sharing the module singleton.
     """
 
     def __init__(self, threshold: int = EDIT_BATCH_NUDGE_THRESHOLD) -> None:
         self._threshold = threshold
         self._count = 0
+        self._path: str | None = None
 
     @property
     def count(self) -> int:
         """Current streak length. Exposed for tests, not used by callers."""
         return self._count
 
-    def record_edit(self, action: str | None) -> str | None:
+    def record_edit(self, action: str | None, path: str | None) -> str | None:
         """Record one Edit call; return the nudge text if this call hit the threshold.
 
-        ``multi`` resets the streak (it is already a batch) without counting
-        toward it. ``delete`` and ``rename`` are neither single-edit-in-a-row
-        evidence nor a signal the agent switched tasks, so they are ignored:
-        neither increment nor reset.
+        Only a ``replace`` on the same ``path`` as the previous call extends
+        the streak. Everything else -- ``multi`` (already a batch), ``create``,
+        ``delete``, ``rename``, or a ``replace`` on another file -- starts over.
         """
-        if action == "multi":
-            self._count = 0
+        if action != "replace" or not path:
+            self._reset()
             return None
-        if action not in ("replace", "create"):
-            return None
-        self._count += 1
+        if path == self._path:
+            self._count += 1
+        else:
+            self._path = path
+            self._count = 1
         if self._count >= self._threshold:
-            self._count = 0
+            self._reset()
             return EDIT_BATCH_NUDGE_MESSAGE
         return None
 
     def record_search(self) -> None:
         """Any Search call resets the streak: the agent moved on to reading, not editing."""
+        self._reset()
+
+    def _reset(self) -> None:
         self._count = 0
+        self._path = None
 
 
 # One counter per server process. HeadroomMCPServer instances are cheap and
@@ -1319,7 +1320,7 @@ class HeadroomMCPServer:
 
         text = code_tools_edit.edit(arguments, Path.cwd())
 
-        nudge = _edit_batch_nudge.record_edit(arguments.get("action"))
+        nudge = _edit_batch_nudge.record_edit(arguments.get("action"), arguments.get("path"))
         if nudge is not None:
             text = f"{text}\n{nudge}"
 

@@ -733,63 +733,66 @@ def test_call_tool_send_message_reaches_the_messaging_module(tmp_path: Path) -> 
 
 
 # --- Edit batch nudge -------------------------------------------------------
-# The Edit tool nudges toward batching after five single edits (replace/create)
-# in a row with no multi or Search in between. Unit tests exercise the pure
-# EditBatchNudge class directly; integration tests exercise the wiring through
-# _handle_edit / _handle_search on a real HeadroomMCPServer instance.
+# The Edit tool nudges toward `multi` after three single `replace` calls in a
+# row on the SAME file. Unit tests exercise the pure EditBatchNudge class
+# directly; integration tests exercise the wiring through _handle_edit /
+# _handle_search on a real HeadroomMCPServer instance.
 
 
-def test_edit_batch_nudge_counts_replace_and_create() -> None:
+def test_edit_batch_nudge_fires_on_third_same_file_replace() -> None:
     nudge = mcp_server.EditBatchNudge()
-    assert nudge.record_edit("replace") is None
+    assert nudge.record_edit("replace", "f.py") is None
     assert nudge.count == 1
-    assert nudge.record_edit("create") is None
+    assert nudge.record_edit("replace", "f.py") is None
     assert nudge.count == 2
-
-
-def test_edit_batch_nudge_ignores_delete_and_rename() -> None:
-    nudge = mcp_server.EditBatchNudge()
-    nudge.record_edit("replace")
-    assert nudge.record_edit("delete") is None
-    assert nudge.count == 1
-    assert nudge.record_edit("rename") is None
-    assert nudge.count == 1
-
-
-def test_edit_batch_nudge_multi_resets_to_zero() -> None:
-    nudge = mcp_server.EditBatchNudge()
-    for _ in range(3):
-        nudge.record_edit("replace")
-    assert nudge.count == 3
-    assert nudge.record_edit("multi") is None
+    third = nudge.record_edit("replace", "f.py")
+    assert third == mcp_server.EDIT_BATCH_NUDGE_MESSAGE
     assert nudge.count == 0
 
 
-def test_edit_batch_nudge_search_resets_to_zero() -> None:
+def test_edit_batch_nudge_streak_restarts_after_firing() -> None:
     nudge = mcp_server.EditBatchNudge()
-    for _ in range(4):
-        nudge.record_edit("create")
-    assert nudge.count == 4
+    for _ in range(3):
+        nudge.record_edit("replace", "f.py")
+    fourth = nudge.record_edit("replace", "f.py")
+    assert fourth is None
+    assert nudge.count == 1
+
+
+def test_edit_batch_nudge_different_file_in_between_resets_streak() -> None:
+    nudge = mcp_server.EditBatchNudge()
+    nudge.record_edit("replace", "a.py")
+    nudge.record_edit("replace", "b.py")
+    assert nudge.count == 1
+    third_overall = nudge.record_edit("replace", "b.py")
+    assert third_overall is None
+    assert nudge.count == 2
+
+
+@pytest.mark.parametrize("action", ["create", "multi", "delete", "rename"])
+def test_edit_batch_nudge_other_actions_reset_streak(action: str) -> None:
+    nudge = mcp_server.EditBatchNudge()
+    nudge.record_edit("replace", "f.py")
+    nudge.record_edit("replace", "f.py")
+    assert nudge.count == 2
+    assert nudge.record_edit(action, "f.py") is None
+    assert nudge.count == 0
+
+
+def test_edit_batch_nudge_search_resets_streak() -> None:
+    nudge = mcp_server.EditBatchNudge()
+    nudge.record_edit("replace", "f.py")
+    nudge.record_edit("replace", "f.py")
+    assert nudge.count == 2
     nudge.record_search()
     assert nudge.count == 0
 
 
-def test_edit_batch_nudge_fires_on_fifth_edit_and_resets() -> None:
+def test_edit_batch_nudge_replace_without_path_resets_streak() -> None:
     nudge = mcp_server.EditBatchNudge()
-    for _ in range(4):
-        assert nudge.record_edit("replace") is None
-    fifth = nudge.record_edit("replace")
-    assert fifth == mcp_server.EDIT_BATCH_NUDGE_MESSAGE
+    nudge.record_edit("replace", "f.py")
+    assert nudge.record_edit("replace", None) is None
     assert nudge.count == 0
-
-
-def test_edit_batch_nudge_sixth_edit_does_not_repeat_nudge() -> None:
-    nudge = mcp_server.EditBatchNudge()
-    for _ in range(5):
-        nudge.record_edit("replace")
-    sixth = nudge.record_edit("replace")
-    assert sixth is None
-    assert nudge.count == 1
 
 
 @pytest.fixture
@@ -801,86 +804,143 @@ def fresh_edit_batch_nudge() -> Iterator[None]:
     mcp_server._edit_batch_nudge = original
 
 
-def test_handle_edit_appends_nudge_on_fifth_single_edit_in_a_row(
+@pytest.fixture
+def edit_batch_server(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fresh_edit_batch_nudge: None
-) -> None:
+) -> mcp_server.HeadroomMCPServer:
+    """A real HeadroomMCPServer rooted at an isolated tmp_path, with a fresh
+    edit-batch-nudge streak, for the _handle_edit / _handle_search
+    integration tests below."""
     monkeypatch.chdir(tmp_path)
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
-
-    last_text = ""
-    for i in range(5):
-        response = asyncio.run(
-            server._handle_edit({"action": "create", "path": f"f{i}.py", "content": "x = 1\n"})
-        )
-        last_text = response[0].kwargs["text"]
-
-    assert last_text.startswith("created f4.py")
-    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE in last_text
+    return mcp_server.HeadroomMCPServer(check_proxy=False)
 
 
-def test_handle_edit_sixth_single_edit_does_not_repeat_nudge(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fresh_edit_batch_nudge: None
+def test_handle_edit_third_same_file_replace_ends_with_nudge_line(
+    edit_batch_server: mcp_server.HeadroomMCPServer, tmp_path: Path
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
 
-    for i in range(5):
-        asyncio.run(
-            server._handle_edit({"action": "create", "path": f"f{i}.py", "content": "x = 1\n"})
+    first = asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "a = 1", "new": "a = 10"}
         )
-    response = asyncio.run(
-        server._handle_edit({"action": "create", "path": "f5.py", "content": "x = 1\n"})
+    )
+    second = asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "b = 2", "new": "b = 20"}
+        )
+    )
+    third = asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "c = 3", "new": "c = 30"}
+        )
     )
 
-    text = response[0].kwargs["text"]
-    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in text
+    assert not first[0].kwargs["text"].endswith(mcp_server.EDIT_BATCH_NUDGE_MESSAGE)
+    assert not second[0].kwargs["text"].endswith(mcp_server.EDIT_BATCH_NUDGE_MESSAGE)
+    assert third[0].kwargs["text"].endswith(mcp_server.EDIT_BATCH_NUDGE_MESSAGE)
+
+
+def test_handle_edit_fourth_replace_after_nudge_does_not_nudge(
+    edit_batch_server: mcp_server.HeadroomMCPServer, tmp_path: Path
+) -> None:
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\nc = 3\nd = 4\n", encoding="utf-8")
+
+    for old, new in (("a = 1", "a = 10"), ("b = 2", "b = 20"), ("c = 3", "c = 30")):
+        asyncio.run(
+            edit_batch_server._handle_edit(
+                {"action": "replace", "path": "f.py", "old": old, "new": new}
+            )
+        )
+
+    fourth = asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "d = 4", "new": "d = 40"}
+        )
+    )
+    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in fourth[0].kwargs["text"]
+
+
+def test_handle_edit_different_path_in_between_resets_streak(
+    edit_batch_server: mcp_server.HeadroomMCPServer, tmp_path: Path
+) -> None:
+    (tmp_path / "f.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "g.py").write_text("y = 1\ny2 = 2\n", encoding="utf-8")
+
+    asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "x = 1", "new": "x = 10"}
+        )
+    )
+    asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "g.py", "old": "y = 1", "new": "y = 10"}
+        )
+    )
+    third_overall = asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "g.py", "old": "y2 = 2", "new": "y2 = 20"}
+        )
+    )
+
+    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in third_overall[0].kwargs["text"]
 
 
 def test_handle_edit_multi_call_resets_streak(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fresh_edit_batch_nudge: None
+    edit_batch_server: mcp_server.HeadroomMCPServer, tmp_path: Path
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+    (tmp_path / "h.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
 
-    for i in range(4):
-        asyncio.run(
-            server._handle_edit({"action": "create", "path": f"f{i}.py", "content": "x = 1\n"})
-        )
-
-    (tmp_path / "existing.py").write_text("old = 1\n", encoding="utf-8")
     asyncio.run(
-        server._handle_edit(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "h.py", "old": "a = 1", "new": "a = 10"}
+        )
+    )
+    asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "h.py", "old": "b = 2", "new": "b = 20"}
+        )
+    )
+    asyncio.run(
+        edit_batch_server._handle_edit(
             {
                 "action": "multi",
-                "path": "existing.py",
-                "edits": [{"old": "old = 1", "new": "old = 2"}],
+                "path": "h.py",
+                "edits": [{"old": "c = 3", "new": "c = 30"}],
             }
         )
     )
 
     response = asyncio.run(
-        server._handle_edit({"action": "create", "path": "f4.py", "content": "x = 1\n"})
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "h.py", "old": "a = 10", "new": "a = 100"}
+        )
     )
-    text = response[0].kwargs["text"]
-    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in text
+    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in response[0].kwargs["text"]
 
 
 def test_handle_search_call_resets_streak(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fresh_edit_batch_nudge: None
+    edit_batch_server: mcp_server.HeadroomMCPServer, tmp_path: Path
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    server = mcp_server.HeadroomMCPServer(check_proxy=False)
-
-    for i in range(4):
-        asyncio.run(
-            server._handle_edit({"action": "create", "path": f"f{i}.py", "content": "x = 1\n"})
-        )
-
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
     (tmp_path / "readme.txt").write_text("hello\n", encoding="utf-8")
-    asyncio.run(server._handle_search({"action": "read", "path": "readme.txt"}))
+
+    asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "a = 1", "new": "a = 10"}
+        )
+    )
+    asyncio.run(
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "b = 2", "new": "b = 20"}
+        )
+    )
+
+    asyncio.run(edit_batch_server._handle_search({"action": "read", "path": "readme.txt"}))
 
     response = asyncio.run(
-        server._handle_edit({"action": "create", "path": "f4.py", "content": "x = 1\n"})
+        edit_batch_server._handle_edit(
+            {"action": "replace", "path": "f.py", "old": "a = 10", "new": "a = 100"}
+        )
     )
-    text = response[0].kwargs["text"]
-    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in text
+    assert mcp_server.EDIT_BATCH_NUDGE_MESSAGE not in response[0].kwargs["text"]

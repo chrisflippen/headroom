@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import InitVar, dataclass, field
 from datetime import datetime
@@ -25,6 +26,16 @@ class HeadroomMode(str, Enum):
 # Model context limits should be provided by the Provider
 # This dict allows user overrides only
 DEFAULT_MODEL_CONTEXT_LIMITS: dict[str, int] = {}
+
+
+def _default_detection_tiers() -> list[Literal["regex", "ner", "semantic"]]:
+    """Typed default for ``CacheAlignerConfig.detection_tiers``.
+
+    A bare ``lambda: ["regex"]`` infers as ``list[str]``, which a type
+    checker cannot narrow to the ``Literal`` element type the field
+    declares — an explicitly annotated factory function is the real fix.
+    """
+    return ["regex"]
 
 
 @dataclass
@@ -70,7 +81,7 @@ class CacheAlignerConfig:
     # - "ner": Named Entity Recognition via spaCy (~5-10ms) - optional
     # - "semantic": Embedding similarity (~20-50ms) - optional
     detection_tiers: list[Literal["regex", "ner", "semantic"]] = field(
-        default_factory=lambda: ["regex"]
+        default_factory=_default_detection_tiers
     )
 
     # Additional dynamic labels to detect (extends default list)
@@ -438,6 +449,24 @@ def is_tool_excluded(name: str, exclude_tools: Iterable[str]) -> bool:
         for alias in aliases
         for pat in patterns
         if "*" in pat or "?" in pat or "[" in pat
+    )
+
+
+def mcp_json_compact_enabled() -> bool:
+    """True unless ``HEADROOM_MCP_JSON_COMPACT=0`` opts out of MCP JSON compaction.
+
+    MCP tools that answer in JSON (Linear, Supabase, Firebase, ...) echo the
+    whole payload back into context verbatim; ``headroom.transforms.
+    mcp_json_compactor`` shrinks it deterministically while keeping the
+    original CCR-retrievable. Default on. Set to "0"/"false"/"no"/"off" to
+    disable globally; a single tool can still be exempted via the existing
+    ``exclude_tools`` config without touching this switch.
+    """
+    return os.environ.get("HEADROOM_MCP_JSON_COMPACT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

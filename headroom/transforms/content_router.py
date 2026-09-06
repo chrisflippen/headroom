@@ -87,6 +87,8 @@ from .lossless_provider import (
     get_lossless_provider,
     get_lossless_verifier,
 )
+from .mcp_json_compactor import STRATEGY as MCP_JSON_STRATEGY
+from .mcp_json_compactor import compact_mcp_json
 from .mixed_content import ContentSection, mixed_content_indicators
 from .relevance_split import build_relevance_query, plan_relevance_split
 
@@ -1381,6 +1383,11 @@ class CompressionStrategy(Enum):
     CONFIG = "config"
     MIXED = "mixed"
     PASSTHROUGH = "passthrough"
+    # Deterministic prune/shorten/cap of an mcp__* tool's JSON echo (see
+    # ``mcp_json_compactor``). Always CCR-marked -- never added to
+    # LOSSY_UNMARKED_STRATEGIES below, since a marker-less result from this
+    # strategy would be exactly as unrecoverable as one from KOMPRESS/TEXT.
+    MCP_JSON = "mcp_json"
 
 
 @dataclass
@@ -5231,6 +5238,33 @@ class ContentRouter(Transform):
                 tool_name = tool_name_map.get(tool_call_id, "")
                 bias = self._get_tool_bias(tool_name) if tool_name else 1.0
 
+                # MCP JSON compaction pre-empt (OpenAI/litellm shape twin of the
+                # Anthropic tool_result branch in _process_content_blocks): an
+                # mcp__* tool answering in JSON echoes the whole payload back
+                # verbatim, so compact it deterministically ahead of the lossy
+                # strategy path below. ccr_retrieve_tool_ids/excluded_tool_ids
+                # above already guard headroom_retrieve results and verbatim-
+                # excluded tools from reaching this line.
+                if isinstance(content, str) and tool_name.startswith("mcp__"):
+                    mcp_result = compact_mcp_json(content, tool_name, exclude_tools=exclude_tools)
+                    if mcp_result.was_modified:
+                        result_slots[i] = {**message, "content": mcp_result.compressed}
+                        transforms_applied.append(f"router:tool_result:{MCP_JSON_STRATEGY}")
+                        if compressed_details is not None:
+                            compressed_details.append(
+                                f"tool:{MCP_JSON_STRATEGY}:{mcp_result.compression_ratio:.2f}"
+                            )
+                        route_counts[MCP_JSON_STRATEGY] = route_counts.get(MCP_JSON_STRATEGY, 0) + 1
+                        self._record_to_toin(
+                            strategy=CompressionStrategy.MCP_JSON,
+                            content=content,
+                            compressed=mcp_result.compressed,
+                            original_tokens=_estimate_tokens(content),
+                            compressed_tokens=_estimate_tokens(mcp_result.compressed),
+                            context=context,
+                        )
+                        continue
+
                 # Bash-search lossless pre-empt: a read-only search (grep/rg/git
                 # grep) run via a shell tool yields byte-losslessly foldable
                 # output. Fold it instead of the lossy strategy path.
@@ -6098,6 +6132,17 @@ class ContentRouter(Transform):
         any_compressed = False
         role = message.get("role", "")
 
+        # exclude_tools resolution for the MCP JSON compaction pre-empt below --
+        # same "None means DEFAULT_EXCLUDE_TOOLS" semantics as apply()'s own
+        # excluded_tool_ids computation, so a tool exempted from the rest of
+        # the router's compression is exempted here too, without a second
+        # config knob.
+        mcp_exclude_tools = (
+            self.config.exclude_tools
+            if self.config.exclude_tools is not None
+            else DEFAULT_EXCLUDE_TOOLS
+        )
+
         # Role-based gate for `text` blocks. Tool/function roles are tool
         # outputs and compress freely; assistant defaults to skip (cache
         # safety) with explicit opt-in; unknown roles default to skip.
@@ -6253,6 +6298,53 @@ class ContentRouter(Transform):
                     if _tr_list_form
                     else tool_content
                 )
+
+                # MCP JSON compaction pre-empt: an mcp__* tool answering in
+                # JSON (Linear, Supabase, Firebase, ...) echoes the whole
+                # payload back verbatim -- SmartCrusher only folds JSON
+                # *arrays*, so a single object (or a ragged array) would
+                # otherwise fall through to the general lossy text path or
+                # get excluded outright. This is a deterministic, CCR-marked
+                # transform (see mcp_json_compactor), so it runs ahead of
+                # content-type routing / SmartCrusher / the lossy path below
+                # rather than competing with them for the same block. The
+                # ccr_retrieve_tool_ids/excluded_tool_ids guards above already
+                # protect headroom_retrieve results and verbatim-excluded
+                # tools from ever reaching this line.
+                if isinstance(tool_text, str) and tool_name.startswith("mcp__"):
+                    mcp_result = compact_mcp_json(
+                        tool_text, tool_name, exclude_tools=mcp_exclude_tools
+                    )
+                    if mcp_result.was_modified:
+                        new_blocks.append(
+                            {
+                                **block,
+                                "content": (
+                                    [{"type": "text", "text": mcp_result.compressed}]
+                                    if _tr_list_form
+                                    else mcp_result.compressed
+                                ),
+                            }
+                        )
+                        transforms_applied.append(f"router:tool_result:{MCP_JSON_STRATEGY}")
+                        if compressed_details is not None:
+                            compressed_details.append(
+                                f"tool:{MCP_JSON_STRATEGY}:{mcp_result.compression_ratio:.2f}"
+                            )
+                        if route_counts is not None:
+                            route_counts[MCP_JSON_STRATEGY] = (
+                                route_counts.get(MCP_JSON_STRATEGY, 0) + 1
+                            )
+                        self._record_to_toin(
+                            strategy=CompressionStrategy.MCP_JSON,
+                            content=tool_text,
+                            compressed=mcp_result.compressed,
+                            original_tokens=_estimate_tokens(tool_text),
+                            compressed_tokens=_estimate_tokens(mcp_result.compressed),
+                            context=block_context,
+                        )
+                        any_compressed = True
+                        continue
 
                 # Bash-search lossless pre-empt (twin of the string-form path):
                 # fold read-only search output (grep/rg/git grep) byte-losslessly

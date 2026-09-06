@@ -12,20 +12,26 @@ in a background daemon thread instead.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
+from typing import Any
+
+import pytest
 
 from headroom.transforms import kompress_compressor as kc
 from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
 from headroom.transforms.kompress_compressor import KompressCompressor, KompressConfig
 
 
-def test_compress_cache_only_passes_through_without_network(monkeypatch):
+def test_compress_cache_only_passes_through_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """compress(allow_download=False) on a cold cache must not hit the network."""
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     monkeypatch.setattr(kc, "_kompress_cache", {})
     monkeypatch.setattr(kc, "_selected_backend", lambda: "onnx")
 
-    def fake_local_first(repo_id, filename, *, allow_network=True):
+    def fake_local_first(repo_id: str, filename: str, *, allow_network: bool = True) -> None:
         assert allow_network is False, "request path must resolve the model cache-only"
         raise LocalEntryNotFoundError("not cached")
 
@@ -40,24 +46,38 @@ def test_compress_cache_only_passes_through_without_network(monkeypatch):
     assert result.compression_ratio == 1.0
 
 
-def test_ensure_background_download_runs_one_thread_per_model(monkeypatch):
+def test_ensure_background_download_runs_one_thread_per_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """At most one download thread per model; retried after it dies; skipped once cached."""
     monkeypatch.setattr(kc, "_kompress_cache", {})
     monkeypatch.setattr(kc, "_download_threads", {})
 
-    created: list[object] = []
+    created: list[FakeThread] = []
 
     class FakeThread:
-        def __init__(self, *, target, args, name, daemon):
+        def __init__(
+            self,
+            *,
+            target: Callable[..., object],
+            args: tuple[object, ...],
+            name: str,
+            daemon: bool,
+        ) -> None:
             self.target, self.args, self.name, self.daemon = target, args, name, daemon
             self._alive = True
             created.append(self)
 
-        def start(self):  # do not actually run — simulate a live download
+        def start(self) -> None:  # do not actually run — simulate a live download
             pass
 
-        def is_alive(self):
+        def is_alive(self) -> bool:
             return self._alive
+
+        def join(
+            self, timeout: float | None = None
+        ) -> None:  # the per-test cache reset joins live downloads
+            self._alive = False
 
     monkeypatch.setattr(kc.threading, "Thread", FakeThread)
 
@@ -85,7 +105,9 @@ def _kompress_router() -> ContentRouter:
     )
 
 
-def test_router_skips_deep_path_and_fetches_in_background_when_not_ready(monkeypatch):
+def test_router_skips_deep_path_and_fetches_in_background_when_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     router = _kompress_router()
     calls = {"ensure": 0, "compress": 0}
 
@@ -96,7 +118,7 @@ def test_router_skips_deep_path_and_fetches_in_background_when_not_ready(monkeyp
         def ensure_background_load(self) -> None:
             calls["ensure"] += 1
 
-        def compress(self, *args, **kwargs):
+        def compress(self, *args: Any, **kwargs: Any) -> Any:
             calls["compress"] += 1
             raise AssertionError("must not run the deep path before the model is cached")
 
@@ -110,7 +132,7 @@ def test_router_skips_deep_path_and_fetches_in_background_when_not_ready(monkeyp
     assert calls["compress"] == 0  # deep path skipped, no inline download
 
 
-def test_router_compresses_cache_only_when_ready(monkeypatch):
+def test_router_compresses_cache_only_when_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     router = _kompress_router()
     seen: dict[str, object] = {}
 
@@ -126,8 +148,14 @@ def test_router_compresses_cache_only_when_ready(monkeypatch):
             raise AssertionError("must not fetch when the model is already cached")
 
         def compress(
-            self, content, *, context="", question=None, target_ratio=None, allow_download=True
-        ):
+            self,
+            content: Any,
+            *,
+            context: str = "",
+            question: Any = None,
+            target_ratio: Any = None,
+            allow_download: bool = True,
+        ) -> ReadyResult:
             seen["allow_download"] = allow_download
             return ReadyResult()
 
@@ -140,25 +168,25 @@ def test_router_compresses_cache_only_when_ready(monkeypatch):
     assert out == "kept words"
 
 
-def test_saturation_fail_open_does_not_hang_request(monkeypatch):
+def test_saturation_fail_open_does_not_hang_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """A saturated execution slot must fail open instead of blocking indefinitely."""
 
     class _FakeEncoding(dict):
-        def __init__(self, word_count: int):
+        def __init__(self, word_count: int) -> None:
             self._ids = list(range(word_count))
             super().__init__()
             self["input_ids"] = [[1 for _ in range(word_count)]]
             self["attention_mask"] = [[1 for _ in range(word_count)]]
 
-        def word_ids(self, batch_index: int = 0):
+        def word_ids(self, batch_index: int = 0) -> list[int]:
             return self._ids
 
     class _FakeModel:
-        def get_scores(self, input_ids, attention_mask):
+        def get_scores(self, input_ids: Any, attention_mask: Any) -> list[list[float]]:
             return [[0.0 for _ in input_ids[0]]]
 
     class _FakeTokenizer:
-        def __call__(self, chunk_words, **kwargs):
+        def __call__(self, chunk_words: Any, **kwargs: Any) -> _FakeEncoding:
             return _FakeEncoding(len(chunk_words))
 
     execution_semaphore = threading.BoundedSemaphore(1)
@@ -174,7 +202,7 @@ def test_saturation_fail_open_does_not_hang_request(monkeypatch):
 
     before = kc.get_kompress_execution_stats()["execution_timeout_skips_total"]
     text = " ".join(["word"] * 40)
-    result_holder: dict[str, object] = {}
+    result_holder: dict[str, Any] = {}
 
     def _run() -> None:
         result_holder["result"] = KompressCompressor(KompressConfig(min_input_words=10)).compress(
@@ -203,27 +231,27 @@ def test_saturation_fail_open_does_not_hang_request(monkeypatch):
     assert after == before + 1
 
 
-def test_capacity_available_still_compresses(monkeypatch):
+def test_capacity_available_still_compresses(monkeypatch: pytest.MonkeyPatch) -> None:
     """When execution semaphore capacity is available, compression is still attempted."""
 
     class _FakeEncoding(dict):
-        def __init__(self, word_count: int):
+        def __init__(self, word_count: int) -> None:
             self._ids = list(range(word_count))
             self["input_ids"] = [[1 for _ in range(word_count)]]
             self["attention_mask"] = [[1 for _ in range(word_count)]]
 
-        def word_ids(self, batch_index: int = 0):
+        def word_ids(self, batch_index: int = 0) -> list[int]:
             return self._ids
 
     class _FakeModel:
-        def get_scores(self, input_ids, attention_mask):
+        def get_scores(self, input_ids: Any, attention_mask: Any) -> list[list[float]]:
             return [[1.0 if idx % 2 == 0 else 0.0 for idx in range(len(input_ids[0]))]]
 
-        def get_keep_mask(self, input_ids, attention_mask):
+        def get_keep_mask(self, input_ids: Any, attention_mask: Any) -> list[list[bool]]:
             return [[idx % 2 == 0 for idx in range(len(input_ids[0]))]]
 
     class _FakeTokenizer:
-        def __call__(self, chunk_words, **kwargs):
+        def __call__(self, chunk_words: Any, **kwargs: Any) -> _FakeEncoding:
             return _FakeEncoding(len(chunk_words))
 
     monkeypatch.setattr(
@@ -242,35 +270,35 @@ def test_capacity_available_still_compresses(monkeypatch):
     assert result.compressed != " ".join(["word"] * 20)
 
 
-def test_validation_probe_waits_for_execution_slot(monkeypatch):
+def test_validation_probe_waits_for_execution_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     """Model-load validation must block for a slot instead of failing open."""
 
     class _FakeTensor:
-        def to(self, _device):
+        def to(self, _device: Any) -> _FakeTensor:
             return self
 
     class _FakeEncoding(dict):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__()
             self["input_ids"] = _FakeTensor()
             self["attention_mask"] = _FakeTensor()
 
     class _FakeTokenizer:
-        def __call__(self, *_args, **_kwargs):
+        def __call__(self, *_args: Any, **_kwargs: Any) -> _FakeEncoding:
             return _FakeEncoding()
 
     class _FakeScore:
-        def detach(self):
+        def detach(self) -> _FakeScore:
             return self
 
-        def cpu(self):
+        def cpu(self) -> _FakeScore:
             return self
 
     class _FakeModel:
-        def __init__(self):
+        def __init__(self) -> None:
             self.calls = 0
 
-        def get_scores(self, input_ids, attention_mask):
+        def get_scores(self, input_ids: Any, attention_mask: Any) -> list[_FakeScore]:
             self.calls += 1
             return [_FakeScore()]
 

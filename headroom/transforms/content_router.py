@@ -2168,6 +2168,45 @@ class ContentRouter(Transform):
             # TOIN recording should never break compression
             logger.debug("TOIN recording failed (non-fatal): %s", e)
 
+    def _compact_mcp_json_block(
+        self,
+        text: str,
+        tool_name: str,
+        *,
+        exclude_tools: Any,
+        transforms_applied: list[str],
+        compressed_details: list[str] | None,
+        route_counts: dict[str, int] | None,
+        context: str = "",
+    ) -> str | None:
+        """Run the deterministic MCP-JSON compactor on one tool result and
+        record the bookkeeping shared by the Anthropic content-blocks path
+        and the OpenAI/litellm string path: the ``router:tool_result:...``
+        transform tag, the compression-ratio detail, the route count, and
+        the TOIN record. Returns the compressed text on ``was_modified``,
+        ``None`` otherwise so the caller falls through to the next strategy.
+        """
+        mcp_result = compact_mcp_json(text, tool_name, exclude_tools=exclude_tools)
+        if not mcp_result.was_modified:
+            return None
+
+        transforms_applied.append(f"router:tool_result:{MCP_JSON_STRATEGY}")
+        if compressed_details is not None:
+            compressed_details.append(
+                f"tool:{MCP_JSON_STRATEGY}:{mcp_result.compression_ratio:.2f}"
+            )
+        if route_counts is not None:
+            route_counts[MCP_JSON_STRATEGY] = route_counts.get(MCP_JSON_STRATEGY, 0) + 1
+        self._record_to_toin(
+            strategy=CompressionStrategy.MCP_JSON,
+            content=text,
+            compressed=mcp_result.compressed,
+            original_tokens=_estimate_tokens(text),
+            compressed_tokens=_estimate_tokens(mcp_result.compressed),
+            context=context,
+        )
+        return mcp_result.compressed
+
     def _timed_compress(
         self,
         content: str,
@@ -5250,23 +5289,17 @@ class ContentRouter(Transform):
                 # above already guard headroom_retrieve results and verbatim-
                 # excluded tools from reaching this line.
                 if isinstance(content, str) and tool_name.startswith("mcp__"):
-                    mcp_result = compact_mcp_json(content, tool_name, exclude_tools=exclude_tools)
-                    if mcp_result.was_modified:
-                        result_slots[i] = {**message, "content": mcp_result.compressed}
-                        transforms_applied.append(f"router:tool_result:{MCP_JSON_STRATEGY}")
-                        if compressed_details is not None:
-                            compressed_details.append(
-                                f"tool:{MCP_JSON_STRATEGY}:{mcp_result.compression_ratio:.2f}"
-                            )
-                        route_counts[MCP_JSON_STRATEGY] = route_counts.get(MCP_JSON_STRATEGY, 0) + 1
-                        self._record_to_toin(
-                            strategy=CompressionStrategy.MCP_JSON,
-                            content=content,
-                            compressed=mcp_result.compressed,
-                            original_tokens=_estimate_tokens(content),
-                            compressed_tokens=_estimate_tokens(mcp_result.compressed),
-                            context=context,
-                        )
+                    compacted_content = self._compact_mcp_json_block(
+                        content,
+                        tool_name,
+                        exclude_tools=exclude_tools,
+                        transforms_applied=transforms_applied,
+                        compressed_details=compressed_details,
+                        route_counts=route_counts,
+                        context=context,
+                    )
+                    if compacted_content is not None:
+                        result_slots[i] = {**message, "content": compacted_content}
                         continue
 
                 # Bash-search lossless pre-empt: a read-only search (grep/rg/git
@@ -6316,36 +6349,25 @@ class ContentRouter(Transform):
                 # protect headroom_retrieve results and verbatim-excluded
                 # tools from ever reaching this line.
                 if isinstance(tool_text, str) and tool_name.startswith("mcp__"):
-                    mcp_result = compact_mcp_json(
-                        tool_text, tool_name, exclude_tools=mcp_exclude_tools
+                    compacted_tool_text = self._compact_mcp_json_block(
+                        tool_text,
+                        tool_name,
+                        exclude_tools=mcp_exclude_tools,
+                        transforms_applied=transforms_applied,
+                        compressed_details=compressed_details,
+                        route_counts=route_counts,
+                        context=block_context,
                     )
-                    if mcp_result.was_modified:
+                    if compacted_tool_text is not None:
                         new_blocks.append(
                             {
                                 **block,
                                 "content": (
-                                    [{"type": "text", "text": mcp_result.compressed}]
+                                    [{"type": "text", "text": compacted_tool_text}]
                                     if _tr_list_form
-                                    else mcp_result.compressed
+                                    else compacted_tool_text
                                 ),
                             }
-                        )
-                        transforms_applied.append(f"router:tool_result:{MCP_JSON_STRATEGY}")
-                        if compressed_details is not None:
-                            compressed_details.append(
-                                f"tool:{MCP_JSON_STRATEGY}:{mcp_result.compression_ratio:.2f}"
-                            )
-                        if route_counts is not None:
-                            route_counts[MCP_JSON_STRATEGY] = (
-                                route_counts.get(MCP_JSON_STRATEGY, 0) + 1
-                            )
-                        self._record_to_toin(
-                            strategy=CompressionStrategy.MCP_JSON,
-                            content=tool_text,
-                            compressed=mcp_result.compressed,
-                            original_tokens=_estimate_tokens(tool_text),
-                            compressed_tokens=_estimate_tokens(mcp_result.compressed),
-                            context=block_context,
                         )
                         any_compressed = True
                         continue

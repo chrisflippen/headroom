@@ -34,7 +34,7 @@ import click
 import headroom
 from headroom import fsutil
 from headroom._subprocess import run
-from headroom.code_tools import brief, plugin_registry, skills_ensure
+from headroom.code_tools import brief, digest, plugin_registry, skills_ensure
 from headroom.code_tools.connections import (
     Keychain,
     MacOSKeychain,
@@ -809,6 +809,100 @@ def code_agent_brief() -> None:
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
                     "additionalContext": result,
+                }
+            }
+        )
+    )
+
+
+@code_agent_group.command("digest-save")
+def code_agent_digest_save() -> None:
+    """Build and save a pre-compaction digest, as a `PreCompact` hook.
+
+    Reads the hook's stdin JSON (`session_id`, `transcript_path`, and a few
+    other fields Claude Code always sends). Builds a digest of the open
+    task from the transcript and saves it under
+    `headroom.paths.workspace_dir() / "code_tools" / "digests"`, then prints
+    the `additionalContext` JSON Claude Code expects so the digest steers
+    the compaction summary itself. Prints nothing and exits 0 in every
+    other case -- missing/invalid stdin, an unreadable transcript, a digest
+    with nothing useful in it, or any other error -- since a broken hook
+    must never block compaction.
+    """
+    from headroom.paths import workspace_dir
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    session_id = payload.get("session_id")
+    transcript_path = payload.get("transcript_path")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return
+
+    try:
+        text = digest.build_digest(Path(transcript_path))
+        if not text:
+            return
+        digest.save_digest(session_id, text, workspace_dir() / "code_tools")
+    except Exception:
+        return
+
+    click.echo(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreCompact",
+                    "additionalContext": digest.precompact_context(text),
+                }
+            }
+        )
+    )
+
+
+@code_agent_group.command("digest-inject")
+def code_agent_digest_inject() -> None:
+    """Print the saved digest for this session, as a `SessionStart` hook.
+
+    Reads the hook's stdin JSON (`session_id` and a few other fields Claude
+    Code always sends for the `"compact"` matcher). When `digest-save`
+    saved a digest for this session, prints the `additionalContext` JSON
+    Claude Code expects, prefixed "Context restored after compaction:".
+    Prints nothing and exits 0 in every other case -- missing/invalid
+    stdin, no saved digest, or any other error -- since a broken hook must
+    never block a session from starting.
+    """
+    from headroom.paths import workspace_dir
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+
+    try:
+        text = digest.load_digest(session_id, workspace_dir() / "code_tools")
+    except Exception:
+        return
+    if not text:
+        return
+
+    click.echo(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": f"Context restored after compaction:\n{text}",
                 }
             }
         )

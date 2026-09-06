@@ -1,5 +1,5 @@
 {
-  "description": "Headroom code agent hooks — keep the code agent's skills current, add a brief under each prompt, and run each edited file's own checks after every edit.",
+  "description": "Headroom code agent hooks — keep the code agent's skills current, add a brief under each prompt, run each edited file's own checks after every edit, and digest the open task before compaction so it survives into the session on the other side.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,6 +9,27 @@
             "type": "command",
             "command": "headroom code-agent skills-ensure",
             "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent digest-inject",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "headroom code-agent digest-save",
+            "timeout": 20
           }
         ]
       }

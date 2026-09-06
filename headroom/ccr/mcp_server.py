@@ -109,6 +109,69 @@ DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787"
 # process under init/launchd. The watchdog reaps us once we are reparented.
 PARENT_DEATH_POLL_INTERVAL = 5.0
 
+# Edit calls in a row (each a single ``replace`` or ``create``) that earns a
+# one-line nudge toward batching, appended to that Edit call's own result.
+EDIT_BATCH_NUDGE_THRESHOLD = 5
+EDIT_BATCH_NUDGE_MESSAGE = (
+    "Five single edits in a row. If the rest are the same kind of change, "
+    "hand the batch to the edit helper or use Edit multi."
+)
+
+
+class EditBatchNudge:
+    """Per-process counter that nudges toward batching after repeated single edits.
+
+    ``replace`` and ``create`` are the two Edit actions that touch exactly one
+    spot; five of those back-to-back suggest a batch that should have gone
+    through ``multi`` (or the edit helper) instead. ``multi`` is already a
+    batch, and a ``Search`` call means the agent moved on to something else —
+    both reset the streak.
+
+    Deliberately process-global rather than per-session or per-file: it is
+    tracking a *pattern of tool use*, not state tied to any one conversation.
+    A tiny class (not a bare closure) so tests can construct isolated
+    instances instead of sharing the module-level singleton.
+    """
+
+    def __init__(self, threshold: int = EDIT_BATCH_NUDGE_THRESHOLD) -> None:
+        self._threshold = threshold
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        """Current streak length. Exposed for tests, not used by callers."""
+        return self._count
+
+    def record_edit(self, action: str | None) -> str | None:
+        """Record one Edit call; return the nudge text if this call hit the threshold.
+
+        ``multi`` resets the streak (it is already a batch) without counting
+        toward it. ``delete`` and ``rename`` are neither single-edit-in-a-row
+        evidence nor a signal the agent switched tasks, so they are ignored:
+        neither increment nor reset.
+        """
+        if action == "multi":
+            self._count = 0
+            return None
+        if action not in ("replace", "create"):
+            return None
+        self._count += 1
+        if self._count >= self._threshold:
+            self._count = 0
+            return EDIT_BATCH_NUDGE_MESSAGE
+        return None
+
+    def record_search(self) -> None:
+        """Any Search call resets the streak: the agent moved on to reading, not editing."""
+        self._count = 0
+
+
+# One counter per server process. HeadroomMCPServer instances are cheap and
+# tests construct many of them, but the nudge is meant to span the whole
+# process's Edit traffic, so it lives at module scope rather than on
+# ``self``.
+_edit_batch_nudge = EditBatchNudge()
+
 
 def _format_session_summary(
     summary: dict[str, Any],
@@ -1244,6 +1307,10 @@ class HeadroomMCPServer:
             if token_estimate is not None:
                 self._stats.record_compression(token_estimate, 5, "search_unchanged")
 
+        # Any Search call means the agent moved on from a run of single
+        # edits, so the batching nudge streak resets.
+        _edit_batch_nudge.record_search()
+
         return [TextContent(type="text", text=text)]
 
     async def _handle_edit(self, arguments: dict[str, Any]) -> list[TextContent]:
@@ -1251,6 +1318,11 @@ class HeadroomMCPServer:
         from headroom.code_tools import edit as code_tools_edit
 
         text = code_tools_edit.edit(arguments, Path.cwd())
+
+        nudge = _edit_batch_nudge.record_edit(arguments.get("action"))
+        if nudge is not None:
+            text = f"{text}\n{nudge}"
+
         return [TextContent(type="text", text=text)]
 
     async def _handle_run(self, arguments: dict[str, Any]) -> list[TextContent]:

@@ -47,6 +47,10 @@ Two cheaper agents are available for work that would otherwise burn your context
   what needs to change in each file and just need it done — renames, repeated small
   fixes, applying the same change across many files. Tell it precisely what to change
   and what tests to run; it reports back a diff summary and the test exit codes.
+- The `Edit` tool itself nudges after five single edits (`replace`/`create`) in a row
+  with no `multi` or `Search` in between. When you see that nudge, it means stop and
+  batch the rest through `multi` or the **edit** helper instead of continuing one at a
+  time.
 
 Do the judgment work yourself. Delegate the reading-heavy or repetitive-writing work.
 
